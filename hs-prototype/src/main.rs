@@ -1,5 +1,9 @@
-use hs_prototype::demo;
+mod demo;
+
+pub mod msg;
+pub mod network;
+pub mod utils;
 
 fn main(){
-    demo();
+    demo::threshold_sig();
 }

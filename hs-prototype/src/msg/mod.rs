@@ -3,7 +3,6 @@ use serde::{
     Deserialize,
 };
 
-
 pub type Signature = threshold_crypto::SignatureShare;
 pub type PrivateKey = threshold_crypto::SecretKeyShare;
 pub type PublicKey = threshold_crypto::PublicKeySet;

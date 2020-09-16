@@ -11,12 +11,14 @@ use std::sync::mpsc::{
     Receiver,
 };
 
-mod msg;
-use msg::*;
+mod mock_net;
+use mock_net::*;
 
-mod network;
-use network::*;
-
+use crate::{
+    msg::*,
+    network::*,
+    utils::*,
+};
 
 struct Node<N: Network<Msg<Vec<u8>>>>{
     network: N,
@@ -104,31 +106,34 @@ impl<N: Network<Msg<Vec<u8>>>> Node<N>{
             );
 
         }
-        // 3. collect partial sigs 
+        // 3. collect 2f+1 partial sigs
         let qc_threshold = (self.total - 1) / 3; 
-        let mut replies: Vec<Msg<Vec<u8>>> = Vec::with_capacity(self.total);
+        let mut replies: Vec<Signature> = Vec::with_capacity(self.total);
 
         // exclude self
-        for _ in 1..self.total{
-            replies.push(self.network.recv());
-        }
+        let qc: Vec<(usize, Msg<Vec<u8>>)> = Vec::new();
+        let mut cnt = 0;
+        loop {
+            let msg = self.network.recv();
 
-        let qc: Vec<(usize, Signature)> = replies.into_iter()
-            .filter(|r: &Msg<Vec<u8>>| r.from != self.index)
-            .map(|r: Msg<Vec<u8>>| (r.from, serde_json::from_slice(&r.cont).unwrap()))
-            // 过滤出有效的 partial signature
-            .filter(|c : &(usize, Signature)| self.pk
-                .public_key_share(c.0)
-                .verify(
-                    &c.1,
-                    &cont,
-                )
-            )
-            .collect();
+            match msg.msg_type {
+                MsgType::Raw => {
+                    
+                    
+
+                }, 
+                _ => {},
+            }
+
+            if cnt > qc_threshold{
+                break
+            }
+        }
 
         // 4. generate combined sig
         let sigs = qc.iter().map(|q| (q.0, &q.1)).collect::<Vec<_>>();
         assert!(sigs.len() >= qc_threshold);
+        /*
         let final_sig = self.pk.combine_signatures(sigs).unwrap();
 
         println!("ok, leader-{} generates final signature: {:?}", self.index, &final_sig);
@@ -143,36 +148,11 @@ impl<N: Network<Msg<Vec<u8>>>> Node<N>{
             if i == self.index{
                 continue
             }
-
-            self.network.send(
-                i, 
-                reply.clone(),
-            );
-        }
-    }
-}
-
-
-struct MockNetworkComponent{
-    index: usize, 
-    send_ch: Sender<(usize, Msg<Vec<u8>>)>,
-    recv_ch: Receiver<Msg<Vec<u8>>>,
-}
-
-
-impl Network<Msg<Vec<u8>>> for MockNetworkComponent{
-    fn send(&mut self, target: usize, msg: Msg<Vec<u8>>) -> (){
-        self.send_ch.send((target, msg)).unwrap();
+            self.network.send(i, reply.clone());
+        }*/
     }
 
-    fn recv(&mut self) -> Msg<Vec<u8>>{
-        self.recv_ch.recv().unwrap()
-    }
-}
 
-struct MockNetwork{
-    out: HashMap<usize, Sender<Msg<Vec<u8>>>>,
-    mailbox: Receiver<(usize, Msg<Vec<u8>>)>,
 }
 
 
@@ -206,7 +186,6 @@ pub fn demo() {
             move || {
                 let mut node = Node{
                     network: MockNetworkComponent{
-                        index: i, 
                         send_ch: mn_s,
                         recv_ch: recver,
                     },
