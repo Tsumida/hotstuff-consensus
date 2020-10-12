@@ -8,5 +8,5 @@ edition = "2018"
 [dependencies]
 rand = ""
 threshold_crypto = { version = "0.4", git = "https://github.com/poanetwork/threshold_crypto" }
-serde = ""
-serde_json = ""
+sha2 = ""
+byteorder = ""
