@@ -9,4 +9,12 @@ edition = "2018"
 rand = ""
 threshold_crypto = { version = "0.4", git = "https://github.com/poanetwork/threshold_crypto" }
 sha2 = ""
-byteorder = ""
+serde = ""
+futures = "0.3"
+tokio = { version = "0.2", features = ["full"] }
+
+
+# tarpc = { version = "0.22", features =  ["full"]}
+# send and recv serde encodedable types over network using tokio.
+# tokio-serde = { version = "0.6", features = ["json"] }
+# tokio-util = { version = "0.3", features = ["codec"] }
