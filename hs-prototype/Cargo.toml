@@ -12,7 +12,8 @@ sha2 = ""
 serde = ""
 futures = "0.3"
 tokio = { version = "0.2", features = ["full"] }
-
+log = "0.4.*"
+simplelog = ""
 
 # tarpc = { version = "0.22", features =  ["full"]}
 # send and recv serde encodedable types over network using tokio.

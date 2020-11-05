@@ -1,16 +1,12 @@
 
 use std::hash::Hash; 
 use sha2::{Digest, Sha256}; 
-use threshold_crypto::{
-    SecretKeySet, 
-    PublicKeySet, 
-};
+
 use serde::{
     Serialize, 
     Deserialize, 
 };
 
-use crate::utils;
 
 pub type PK = threshold_crypto::PublicKeySet;
 pub type SK = threshold_crypto::SecretKeyShare; 
@@ -20,6 +16,12 @@ pub type ReplicaID = String;
 pub type ViewNumber = u64; 
 pub type Cmd = String; 
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub enum Role{
+    Leader, 
+    Follower, 
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct NodeHash(pub [u8; 32]); 
 
@@ -27,7 +29,7 @@ impl NodeHash{
     pub fn genesis() -> NodeHash{
         NodeHash([0xAB; 32])
     }
-    pub const fn byte_len() -> usize{ 256 }
+    // pub const fn byte_len() -> usize{ 256 }
 }
 
 
@@ -37,10 +39,10 @@ impl std::convert::AsRef<[u8]> for NodeHash{
     }
 }
 
-pub fn mix_sign(sk:&SK, node: &TreeNode, view: u64) -> Sign{
+pub fn sign(sk:&SK, node: &TreeNode, view: u64) -> Sign{
     let mut buf: Vec<u8> = Vec::with_capacity(264);  // 256 + 8
-    buf.extend(TreeNode::hash(&node).0.into_iter()); 
-    buf.extend(view.to_be_bytes().into_iter());
+    buf.extend(TreeNode::hash(&node).0.iter()); 
+    buf.extend(view.to_be_bytes().iter());
     sk.sign(&buf)
 }
 
@@ -58,28 +60,46 @@ impl QCHash{
         QCHash([0; 32])
     }
 
-    pub const fn byte_len() -> usize {256}
+    // pub const fn byte_len() -> usize {256}
 }
+
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GenericQC{
     pub view: u64, 
     pub node: TreeNode, 
-    pub combined_sign: CombinedSign, 
+    // None for bootstrapping. 
+    pub combined_sign: Option<CombinedSign>, 
 }
 
 impl GenericQC{
     pub fn new(view:u64, node: TreeNode, combined_sign: CombinedSign) -> Self{
         GenericQC{
-            view, node, combined_sign
+            view, node, 
+            combined_sign: Some(combined_sign), 
         }
     }
 
+    pub fn genesis(view: ViewNumber, node: &TreeNode) -> Self{
+        GenericQC{
+            view, 
+            node: node.clone(), 
+            combined_sign: None, 
+        }
+    }
+
+    /*
+    pub fn is_bootstrapping_qc(&self) -> bool{
+        self.combined_sign.is_none()
+    }
+    */
+
     pub fn hash(&self) -> QCHash{
-        let m = &self.combined_sign;
         let mut res = [0u8; 32]; 
-        let v = m.to_bytes();
-        res.copy_from_slice(&v[..32]);
+        if let Some(ref v) = self.combined_sign{
+            res.copy_from_slice(&v.to_bytes()[32..64]);
+        }
+        // None -> [0u8; 32]
         QCHash(res)
     }   
 }
@@ -117,6 +137,7 @@ impl TreeNode{
         NodeHash(res)
     }
 
+    /*
     #[inline]
     pub fn new(cmds: impl IntoIterator<Item=Cmd>, height: u64, parent: NodeHash, justify: QCHash) -> TreeNode{
         TreeNode{
@@ -125,15 +146,15 @@ impl TreeNode{
             parent,
             justify, 
         }
-    }
+    }*/
 
-    pub fn node_and_hash(cmds: impl IntoIterator<Item=Cmd>, height: u64, parent: NodeHash, justify: QCHash) -> (TreeNode, Box<NodeHash>){
-        let node = TreeNode{
+    pub fn node_and_hash(cmds: impl IntoIterator<Item=Cmd>, height: u64, parent: NodeHash, justify: QCHash) -> (Box<TreeNode>, Box<NodeHash>){
+        let node = Box::new(TreeNode{
             cmds: cmds.into_iter().collect::<Vec<Cmd>>(), 
             height, 
             parent,
             justify, 
-        };
+        });
 
         let hash = Box::new(TreeNode::hash(&node));
 
@@ -166,15 +187,14 @@ fn test_branch(){
 
     for vc in cmds.clone(){
         height += 1;
-        let node = TreeNode::new(
+        let (node, h) = TreeNode::node_and_hash(
             vc.into_iter(), 
             height, 
             parent, 
             qc_hash.clone(), 
         );
-        let h = TreeNode::hash(&node);
-        parent = h.clone(); 
-        tree.insert(h, node);
+        parent = h.as_ref().clone(); 
+        tree.insert(*h, *node);
     }
     // from leaf to root 
     // Should record leaf or its hash.
@@ -195,13 +215,14 @@ fn test_branch(){
 
 #[test]
 fn test_combined_sign(){
+
     let f = 1; 
     let n = 3 * f + 1;
-    let (_, pks, vec_sk) = utils::threshold_sign_kit(n, 2*f);
+    let (_, pks, vec_sk) = crate::utils::threshold_sign_kit(n, 2*f);
     let msg = "Hello, world!"; 
 
     let signs = vec_sk.iter()
-        .map(|(i, s)| s.sign(msg))
+        .map(|(_, s)| s.sign(msg))
         .collect::<Vec<Sign>>(); 
 
     // verify all partial signature. 
