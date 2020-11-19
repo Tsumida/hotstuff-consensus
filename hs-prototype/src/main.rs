@@ -1,143 +1,716 @@
-//!
-//! Event-driven HotStuff prototype
-//! 
+//! Demo
 
-use tokio::{
-    prelude::*, 
+use std::{
+    collections::{
+        HashMap, 
+    }, 
+    time::{
+        Duration
+    }, 
+    thread::{
+        spawn, sleep, 
+        JoinHandle,
+    }, 
     sync::{
-        mpsc, 
-    },
-    runtime::Runtime, 
+        mpsc::{Sender, Receiver, channel}, 
+        Mutex, Condvar, Arc,
+    }, 
 };
 
-use log::{
-    info,
-};
-
+use log::info; 
 use simplelog::*; 
-
-mod state_machine; 
-use state_machine::{
-    StateMachine, 
-    MsgToSM, 
-    Ready, 
+use serde::{
+    Serialize, Deserialize, 
 };
+
 mod utils; 
-use utils::threshold_sign_kit;
-mod basic; 
-use basic::*;
+mod basic;
+use utils::*; 
+use basic::*; 
 
 
-#[test]
-#[ignore = "dev"]
-fn ds_size(){
-    macro_rules! size{
-        ($x:ty, $($y:ty),+) => {
-            size!($x); 
-            size!($($y),+)
-        };
-        ($x:ty) => {
-            println!("size of {:12} = {:4} Bytes.", stringify!($x), std::mem::size_of::<$x>()); 
-        }; 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum RequestType{
+    NewView, 
+    Proposal, 
+    Vote, 
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Context{
+    from: ReplicaID, 
+    to: ReplicaID, 
+    view: ViewNumber, 
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RpcRequest{
+    ctx: Context, 
+    msg_type: RequestType, 
+    // proposal 
+    node: Option<Box<TreeNode>>, 
+    // new view msg
+    qc: Option<Box<GenericQC>>, 
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum ResponseType{
+    Accpet,     // accept proposal, 
+    Vote,       // will to vote. 
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RpcResponse{
+    ctx: Context, 
+    msg_type: ResponseType, 
+    sign: Option<Box<SignKit>>, 
+    will_to_vote: bool, 
+}
+
+trait HotStuff: SysConf + StateMachine + Pacemaker + Crypto{
+    fn is_leader(&self) -> bool;
+
+    // Return or ignore if self is not the leader. 
+    fn on_recv_vote(&mut self, ctx: &Context, node: &TreeNode, sign: &SignKit); 
+
+    // Return immediately if self is not the leader. 
+    fn on_recv_proposal(&mut self, ctx: &Context, node: &TreeNode); 
+
+    fn on_beat(&mut self, cmds: &Vec<Cmd>);
+
+    fn run(&mut self); 
+
+}
+
+trait SysConf{
+    fn self_id(&self) -> &str;
+
+    fn get_addr(&self, node_id: &String) -> Option<&String>;
+
+    fn threshold(&self) -> usize;
+}
+
+trait Crypto{
+    fn sign_id(&self) -> SignID; 
+
+    fn sign(&self, node:&TreeNode) -> Box<Sign>; 
+    
+    // TODO: return Result
+    fn combine_partial_sign(&self) -> Box<CombinedSign>; 
+}
+
+trait StateMachine: MemPool{
+    fn on_commit(&mut self, node: &TreeNode);
+
+    fn update_nodes(&mut self, node: &TreeNode); 
+
+    fn safe_node(&mut self, node: &TreeNode, qc: &GenericQC) -> bool; 
+
+}
+
+trait Timer{
+    fn reset_timer(&mut self);
+
+    fn tick(&mut self, delta: u64); 
+
+    fn deadline(&self) -> u64; 
+    
+    fn update_deadline(&mut self, deadline: u64); 
+
+    fn touch_deadline(&self) -> bool; 
+}
+
+trait Pacemaker: MemPool + Timer{
+    /// leader election; 
+    fn leader_election(&mut self);
+
+    fn view_change(&mut self); 
+}
+
+trait MemPool{
+    // Append new node into mempool. 
+    fn append_new_node(&mut self, node: &TreeNode);
+
+    fn append_new_qc(&mut self, qc: &GenericQC); 
+
+    fn get_node(&mut self, node_hash: &NodeHash) -> Option<Arc<TreeNode>>; 
+
+    // if node is genesis, return None. 
+    fn find_parent(&self, node: &TreeNode) -> Option<Arc<TreeNode>>;
+
+    // Get GenericQC by node.justify
+    fn find_qc_by_justify(&self, node_hash: &NodeHash) -> Option<Arc<GenericQC>>;
+
+    // Get node through GenericQC.node
+    fn find_node_by_qc(&self, qc_hash: &QCHash) -> Option<Arc<TreeNode>>;
+
+    // b'', b', b
+    fn find_three_chain(&self, node:&NodeHash) -> Vec<Arc<TreeNode>>;
+
+    fn is_continues_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool; 
+
+    fn is_conflicting(&self, a:&TreeNode, b: &TreeNode) -> bool;
+
+    fn get_qc_high(&self) -> Arc<GenericQC>;
+
+    fn update_qc_high(&mut self, qc_node: &TreeNode, qc_high: &GenericQC);
+
+    fn get_leaf(&self) -> Arc<TreeNode>;
+
+    fn update_leaf(&mut self, new_leaf: &TreeNode);
+
+    fn get_locked_node(&self) -> Arc<TreeNode>; 
+
+    fn update_locked_node(&mut self, node: &TreeNode);
+
+    fn get_last_executed(&self) -> Arc<TreeNode>; 
+
+    fn update_last_executed_node(&mut self, node: &TreeNode); 
+
+    fn get_view(&self) -> ViewNumber;
+
+    fn increase_view(&mut self, new_view: ViewNumber);
+
+    // Reset view related status like voting set
+    fn reset(&mut self); 
+
+    // false means duplicate signs from the same replica. 
+    fn add_vote(&mut self, ctx: &Context, sign: &SignKit) -> bool;
+
+    fn vote_set_size(&self) -> usize; 
+}
+
+trait Network{
+    // new round 
+    fn propose(&mut self, node: &TreeNode); 
+
+    // As replica, accept and reply. 
+    fn accept_proposal(&mut self, ctx: &Context, node:&TreeNode, sign: &SignKit); 
+
+    // Broadcast information about new leader. 
+    fn new_leader(&mut self, ctx: &Context, leader: &ReplicaID); 
+}
+
+struct NetworkKit{
+    sender: Sender<RpcRequest>, 
+    recvr: Receiver<RpcRequest>, 
+}
+
+struct Machine{
+    node_pool: HashMap<NodeHash, Arc<TreeNode>>, 
+    qc_map: HashMap<QCHash, Arc<GenericQC>>, 
+    leaf: Arc<TreeNode>,
+    leaf_high: ViewNumber, 
+    qc_high: Arc<GenericQC>, 
+    view: ViewNumber, 
+    // viewnumber of last voted treenode.
+    vheight: ViewNumber, 
+
+    tick_ch: Receiver<u64>, 
+    tick: u64, 
+    deadline: u64, 
+
+    b_executed: Arc<TreeNode>, 
+    b_locked: Arc<TreeNode>, 
+
+    peer_conf: HashMap<ReplicaID, String>, 
+    self_id: ReplicaID, 
+    leader_id: Option<ReplicaID>, 
+
+    sign_id: SignID, 
+    pks: PK, 
+    sks: SK, 
+
+    voting_set: HashMap<ReplicaID, SignKit>, 
+    decided: bool, 
+}
+
+impl Machine{
+    fn new(
+        tick_ch: Receiver<u64>, 
+        peer_conf: HashMap<String, String>, 
+        self_id: &String, 
+        sign_id: u32,   
+        pks: PK, 
+        sks: SK) -> Machine
+    {
+        let node = TreeNode::genesis(); 
+        let first_qc = GenericQC::genesis(0, &node); 
+        let mut qc_map = HashMap::with_capacity(4); 
+        qc_map.insert(GenericQC::hash(&first_qc), Arc::new(first_qc.clone())); 
+
+        Machine{
+            node_pool: HashMap::new(), 
+            qc_map,
+            leaf: Arc::new(node.clone()),
+            leaf_high: 0, 
+            qc_high: Arc::new(first_qc), 
+            view: 0, 
+            // viewnumber of last voted treenode.
+            vheight: 0, 
+
+            tick_ch, 
+            tick: 0, 
+            // TODO
+            deadline: 1 << 10, 
+
+            b_executed: Arc::new(node.clone()), 
+            b_locked: Arc::new(node.clone()), 
+
+            peer_conf, 
+            self_id: self_id.clone(),  
+            leader_id: None, 
+
+            sign_id: sign_id, 
+            pks, 
+            sks, 
+
+            voting_set: HashMap::new(), 
+            decided: false,  
+        }
+    }
+}
+
+impl MemPool for Machine{
+    fn append_new_node(&mut self, node: &TreeNode) {
+        let h = TreeNode::hash(node);
+        self.node_pool.insert(h, Arc::new(node.clone()));
     }
 
-    size!(
-        PK, SK, Sign, CombinedSign, ReplicaID, ViewNumber, NodeHash, GenericQC, TreeNode
-    ); 
-}
+    fn append_new_qc(&mut self, qc: &GenericQC) {
+        let h = GenericQC::hash(qc); 
+        self.qc_map.insert(h, Arc::new(qc.clone()));
+    }
 
-pub trait Storage{
+    fn find_parent(&self, node: &TreeNode) -> Option<Arc<TreeNode>> {
+        self.node_pool
+        .get(&node.parent)
+        .and_then(|node| Some(node.clone()))
+    }
+
+    fn find_qc_by_justify(&self, node_hash: &NodeHash) -> Option<Arc<GenericQC>>{
+        self.node_pool
+        .get(node_hash)
+        .and_then(|node| self.qc_map.get(&node.justify))
+        .and_then(|qc| Some(qc.clone()))
+    }
+
+    fn find_node_by_qc(&self, qc_hash: &QCHash) -> Option<Arc<TreeNode>> {
+        self.qc_map
+        .get(qc_hash)
+        .and_then(|qc| self.node_pool.get(&qc.node))
+        .and_then(|node| Some(node.clone()))
+    }
     
+    fn find_three_chain(&self, mut node_hash: &NodeHash) -> Vec<Arc<TreeNode>> {
+        let mut chain = Vec::with_capacity(3); 
+        // b''
+        let mut ptr = node_hash.clone(); 
+        if let Some(qc) = self.find_qc_by_justify(&ptr){
+            chain.push(self.node_pool.get(&qc.node).unwrap().clone()); 
+            ptr = qc.node.clone(); 
+        }
+        // b'
+        if let Some(qc) = self.find_qc_by_justify(&ptr){
+            chain.push(self.node_pool.get(&qc.node).unwrap().clone()); 
+            ptr = qc.node.clone(); 
+        }
+        // b
+        if let Some(qc) = self.find_qc_by_justify(&ptr){
+            chain.push(self.node_pool.get(&qc.node).unwrap().clone()); 
+        }
+        chain
+    }
+
+    fn update_leaf(&mut self, new_leaf: &TreeNode) {
+        if self.leaf_high < new_leaf.height{
+            self.leaf_high = new_leaf.height; 
+            self.leaf = Arc::new(new_leaf.clone()); 
+            self.node_pool.insert(TreeNode::hash(new_leaf), self.leaf.clone());
+        }
+    }
+
+    fn get_leaf(&self) -> Arc<TreeNode> {
+        self.leaf.clone()
+    }
+
+    fn get_qc_high(&self) -> Arc<GenericQC> {
+        self.qc_high.clone()
+    }
+
+    fn update_qc_high(&mut self, qc_node: &TreeNode, qc_high: &GenericQC) {
+        let h = GenericQC::hash(qc_high); 
+        // let qc_node = self.find_node_by_qc(&qc_high).unwrap(); 
+        let prev_node = self.find_node_by_qc(&h).unwrap(); 
+        if prev_node.height < qc_node.height{
+            self.qc_high = Arc::new(qc_high.clone()); 
+            self.leaf = Arc::new(qc_node.clone()); 
+            self.leaf_high = qc_node.height; 
+        }
+    }
+
+    fn is_conflicting(&self, mut a:&TreeNode, mut b: &TreeNode) -> bool {
+        let (a, b) = if a.height >= b.height{
+            (a, b)
+        }else{
+            (b, a)
+        };
+
+        // a.height >= b.height
+        let mut node = a; 
+        while node.height > b.height{
+            if let Some(prev) = self.node_pool.get(&node.parent){
+                node = prev.as_ref(); 
+            }else{
+                break; 
+            }
+        }
+
+        node.height == b.height && node.cmds == b.cmds
+    }
+
+    fn get_node(&mut self, node_hash: &NodeHash) -> Option<Arc<TreeNode>>{
+        self.node_pool
+        .get(node_hash)
+        .and_then(|node| Some(node.clone()))
+    }
+
+    fn get_locked_node(&self) -> Arc<TreeNode>{
+        self.b_locked.clone()
+    }
+
+    fn update_locked_node(&mut self, node: &TreeNode){
+        self.b_locked = Arc::new(node.clone()); 
+    }
+
+    fn get_last_executed(&self) -> Arc<TreeNode>{
+        self.b_executed.clone()
+    }
+
+    fn update_last_executed_node(&mut self, node: &TreeNode){
+        self.b_executed = Arc::new(node.clone()); 
+    }
+
+    fn get_view(&self) -> ViewNumber{
+        self.view
+    }
+
+    fn increase_view(&mut self, new_view: ViewNumber){
+        self.view = ViewNumber::max(self.view, new_view); 
+    }
+
+    fn is_continues_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool{
+        if chain.len() != 3{
+            return false; 
+        }
+
+        assert!(chain.len() == 3); 
+        let b_3 = chain.get(0).unwrap().as_ref(); 
+        let b_2 = chain.get(1).unwrap().as_ref();
+        let b = chain.get(2).unwrap().as_ref(); 
+
+        &b_3.parent == &TreeNode::hash(b_3) &&
+        &b_2.parent == &TreeNode::hash(b)
+    }
+
+    fn reset(&mut self) {
+        self.voting_set.clear(); 
+        self.decided = false; 
+    }
+
+    fn add_vote(&mut self, ctx: &Context, sign: &SignKit) -> bool{
+        self.voting_set.insert(ctx.from.clone(), sign.clone()).is_none()
+    }
+
+    fn vote_set_size(&self) -> usize{
+        self.voting_set.len()
+    }
+
 }
 
-pub struct HotStuffNode{
-    node_id: String, 
+impl StateMachine for Machine{
 
-    down: mpsc::Receiver<()>, 
+    fn update_nodes(&mut self, node: &TreeNode) {
+        let b = node; 
+        let h = TreeNode::hash(node); 
+        let chain = self.find_three_chain(&h); 
+        let b_lock = self.get_locked_node(); 
 
-    // stateMachine
-    sm_out: mpsc::Receiver<Ready>,
-    sm_in: mpsc::Sender<MsgToSM>, 
+        if let Some(b_2) = chain.get(1){
+            if b_2.height > b_lock.height{
+                self.update_locked_node(node); 
+            }
+        }
+
+        if chain.len() == 3 && self.is_continues_three_chain(&chain){
+            self.on_commit(chain.last().unwrap()); 
+        }
+    }
+
+    fn on_commit(&mut self, node: &TreeNode) {
+        let b_exec = self.get_locked_node();
+        if b_exec.height < node.height{
+            if let Some(parent) = self.get_node(&node.parent).clone(){
+                self.on_commit(parent.as_ref());
+            }
+        }
+    }
+
+    fn safe_node(&mut self, node: &TreeNode, qc: &GenericQC) -> bool {
+        !self.is_conflicting(node, self.b_locked.as_ref()) ||
+        qc.view > self.b_locked.height
+    }
 }
 
-impl HotStuffNode{
-    // 
-    async fn run(&mut self){
+impl Timer for Machine{
+    fn reset_timer(&mut self){
+        self.tick; 
+        self.deadline = 0; 
+    }
+
+    fn tick(&mut self, delta: u64){
+        self.tick += delta; 
+    }
+
+    fn deadline(&self) -> u64{
+        self.deadline
+    }
+    
+    fn update_deadline(&mut self, deadline: u64){
+        self.deadline = u64::max(self.deadline, deadline);
+    }
+
+    fn touch_deadline(&self) -> bool{
+        self.tick >= self.deadline
+    }
+}
+
+impl Network for Machine{
+    fn propose(&mut self, node: &TreeNode) {
+        unimplemented!()
+    }
+
+    fn accept_proposal(&mut self, ctx: &Context, node:&TreeNode, sign: &SignKit) {
+        unimplemented!()
+    }
+
+    fn new_leader(&mut self, ctx: &Context, leader: &ReplicaID) {
+        unimplemented!()
+    }
+}
+
+impl Pacemaker for Machine{
+    fn leader_election(&mut self) {
+        unimplemented!()
+    }
+
+    fn view_change(&mut self) {
+        self.reset(); 
+        self.increase_view(self.get_view() + 1); 
+    }
+}
+
+impl SysConf for Machine{
+    fn self_id(&self) -> &str {
+        self.self_id.as_ref()
+    }
+
+    fn get_addr(&self, node_id: &String) -> Option<&String> {
+        self.peer_conf.get(node_id)
+    }
+
+    fn threshold(&self) -> usize {
+        (self.peer_conf.len() << 1) / 3
+    }
+}
+
+impl Crypto for Machine{
+    fn sign_id(&self) -> SignID {
+        self.sign_id
+    }
+
+    fn sign(&self, node:&TreeNode) -> Box<Sign> {
+        let buf = node.to_be_bytes();
+        let s = self.sks.sign(&buf); 
+
+        Box::new(s)
+    }
+
+    fn combine_partial_sign(&self) -> Box<CombinedSign> {
+        // wrapper
+        let tmp = self.voting_set
+        .values()
+        .map(|kit| (kit.sign_id as usize, &kit.sign))
+        .collect::<Vec<_>>(); 
+
+        Box::new(self.pks.combine_signatures(tmp).unwrap())
+    }
+}
+
+impl HotStuff for Machine{
+
+    fn run(&mut self) {
         let mut down = false; 
         loop{
-            tokio::select!{
-                // state machine 
-                Some(ready) = self.sm_out.recv() => {
-                    self.process_ready(ready).await;
-                }, 
-                Some(()) = self.down.recv() => {
-                    down = true;
-                }
+
+            // tick. 
+            if let Ok(new_tick) = self.tick_ch.recv(){
+                self.tick = new_tick; 
+                info!("{} tick-{}", self.self_id, new_tick);
             }
+
+            if self.touch_deadline(){
+                self.view_change(); 
+                continue;
+            }
+            
+            // TODO: do something. 
+
+
+            // TODO: remove this. 
+            if self.tick >= 10{
+                down = true; 
+            }
+
             if down{
-                break;
+                break; 
             }
         }
+        info!("hotstuff node {} down", self.self_id()); 
     }
 
-    /// Process Ready Msg from StateMachine.
-    async fn process_ready(&mut self, ready: Ready){
-        match ready{
-            Ready::UpdateQCHigh(qc) => {
-                // Notify PM
-            }, 
-            Ready::VoteReply(hash, partial_sign) => {
-                // Respond to rpc requests. 
-            }, 
-            Ready::State(_) => {
-                // let (ss, hs) = state.as_ref(); 
-                // stablization or .. 
-            }, 
-            _ => {}, 
+
+    fn is_leader(&self) -> bool {
+        self.leader_id
+        .as_ref()
+        .map_or(
+            false, 
+            |leader| leader == &self.self_id
+        )
+    }
+
+    // start prposal
+    fn on_beat(&mut self, cmds: &Vec<Cmd>) {
+        let prev_leaf = self.get_leaf(); 
+        let parent = TreeNode::hash(prev_leaf.as_ref());
+        let justify = GenericQC::hash(self.get_qc_high().as_ref());
+        let (node, _) = TreeNode::node_and_hash(
+            cmds, 
+            self.view, 
+            &parent, 
+            &justify,
+        ); 
+
+        // update leaf & statemachine. 
+        self.append_new_node(node.as_ref());
+        self.update_leaf(node.as_ref());
+
+        // broadcast 
+        self.propose(node.as_ref());
+    }
+
+     // Return or ignore if self is not the leader. 
+    fn on_recv_vote(&mut self, ctx: &Context, node:&TreeNode, sign: &SignKit){
+        if self.decided || self.add_vote(ctx, sign){
+            return ;
+        }
+        // vote at most once. 
+        if self.vote_set_size() > self.threshold(){
+            //self.compute_combined_sign(); 
+            let combined_sign = self.combine_partial_sign(); 
+
+            // TODO: leaf as node <=> no new proposal 
+            let node_hash = TreeNode::hash(node); 
+            let qc = GenericQC{
+                view: self.view, 
+                node: node_hash, 
+                combined_sign: Some(*combined_sign), 
+            };
+            self.update_qc_high(node, &qc);
+            self.decided = true; 
+        }
+    }  
+
+    // Return immediately if self is not the leader. 
+    fn on_recv_proposal(&mut self, ctx: &Context, node: &TreeNode){
+        let node_hash = TreeNode::hash(node); 
+        if let Some(justify) = self.find_qc_by_justify(&node_hash){
+            if node.height > self.vheight && self.safe_node(node, justify.as_ref()){
+                self.vheight = node.height; 
+                // send reply
+                let kit = SignKit{
+                    sign: *self.sign(node), 
+                    sign_id: self.sign_id(), 
+                };
+                self.accept_proposal(ctx, node, &kit); 
+            }
+
         }
     }
 }
 
-#[tokio::main]
-async fn main() {
-    CombinedLogger::init(
-        vec![
-           TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Mixed),  
-           // WriteLogger::new(LevelFilter::Warn, Config::default(), File::create("./warnlog.log").unwrap()),
-        ]
-    ).unwrap(); 
-    info!("running demo (4 nodes)");
+fn test(){
+    info!("run demo"); 
     let f = 1; 
     let n = 3 * f + 1;
+    let peer_config = (0..n)
+    .map(|i| (format!("node-{}", i), format!("localhost:{}", 8000+i)))
+    .collect::<HashMap<String, String>>(); 
 
-    let (sks, pks, _) = utils::threshold_sign_kit(n, 2*f); 
-    let (mut sm, ready_ch, msg_ch, _) = StateMachine::new(format!("node-1"), sks.secret_key_share(0), pks.clone());
-    let (mut down_s, down_r) = mpsc::channel(1);
-    let mut node = HotStuffNode{
-        node_id: "node-0".to_string(), 
-        sm_in: msg_ch, 
-        sm_out: ready_ch, 
-        down: down_r, 
-    };
+    let (_, pks, sk) = threshold_sign_kit(n, 2*f); 
 
-    tokio::spawn(
-        async move{
-            tokio::time::delay_for(std::time::Duration::from_millis(2 * 1000)).await; 
-            down_s.send(()).await.unwrap();
-            info!("demo done."); 
-        }
+    // run machines. 
+    let mut handlers = vec![]; 
+
+    // peer_conf dos not live enough. 
+    let backup = peer_config.clone(); 
+    for (kv, sk_conf) in peer_config.into_iter().zip(sk){
+        // TODO: unbounded channel
+        let (tick_sender, tick_recvr) = channel(); 
+        let (k, _) = kv; 
+        let (sign_id, sks) = sk_conf; 
+        let peers = backup.clone(); 
+        let pks = pks.clone(); 
+        let handler = spawn(
+            move || {
+                let mut mc = Machine::new(
+                    tick_recvr, 
+                    peers,
+                    &k, 
+                    sign_id as u32, 
+                    pks, 
+                    sks, 
+                );
+                mc.run(); 
+            }
+        ); 
+        // timer 
+        spawn(
+            move ||{
+                let mut tick = 0; 
+                loop{
+                    sleep(Duration::from_secs(3)); 
+                    if tick_sender.send(tick).is_err(){
+                        break; 
+                    }
+                    tick += 1; 
+                }
+            }
+        ); 
+
+        handlers.push(handler); 
+    }
+
+    // handlers...
+    handlers.into_iter().for_each(|h| h.join().unwrap()); 
+}
+
+fn main(){
+    let _ = CombinedLogger::init(
+        vec![
+            TermLogger::new(LevelFilter::Info, Config::default(),TerminalMode::Mixed), 
+        ], 
     );
 
-    tokio::spawn(
-        async move{
-            sm.run().await; 
-        }
-    );
-
-    tokio::spawn(
-        async move {
-            node.run().await;
-        }
-    ).await.unwrap();
-
+    test()
 }

@@ -15,6 +15,13 @@ pub type CombinedSign = threshold_crypto::Signature;
 pub type ReplicaID = String;  
 pub type ViewNumber = u64; 
 pub type Cmd = String; 
+pub type SignID = u32; 
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SignKit{
+    pub sign: Sign, 
+    pub sign_id: SignID, 
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum Role{
@@ -66,24 +73,26 @@ impl QCHash{
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GenericQC{
+    // view equals node.height 
     pub view: u64, 
-    pub node: TreeNode, 
+    pub node: NodeHash, 
     // None for bootstrapping. 
     pub combined_sign: Option<CombinedSign>, 
 }
 
 impl GenericQC{
-    pub fn new(view:u64, node: TreeNode, combined_sign: CombinedSign) -> Self{
+    pub fn new(view:u64, node: &NodeHash, combined_sign: &CombinedSign) -> Self{
         GenericQC{
-            view, node, 
-            combined_sign: Some(combined_sign), 
+            view, 
+            node: node.clone(), 
+            combined_sign: Some(combined_sign.clone()), 
         }
     }
 
     pub fn genesis(view: ViewNumber, node: &TreeNode) -> Self{
         GenericQC{
             view, 
-            node: node.clone(), 
+            node: TreeNode::hash(node), 
             combined_sign: None, 
         }
     }
@@ -148,70 +157,36 @@ impl TreeNode{
         }
     }*/
 
-    pub fn node_and_hash(cmds: impl IntoIterator<Item=Cmd>, height: u64, parent: NodeHash, justify: QCHash) -> (Box<TreeNode>, Box<NodeHash>){
+    pub fn node_and_hash<'a>(cmds: impl IntoIterator<Item=&'a Cmd>, height: u64, parent: &NodeHash, justify: &QCHash) -> (Box<TreeNode>, Box<NodeHash>){
         let node = Box::new(TreeNode{
-            cmds: cmds.into_iter().collect::<Vec<Cmd>>(), 
+            cmds: cmds.into_iter().cloned().collect::<Vec<Cmd>>(), 
             height, 
-            parent,
-            justify, 
+            parent: parent.clone(),
+            justify: justify.clone(), 
         });
 
         let hash = Box::new(TreeNode::hash(&node));
 
         (node, hash)
     }
+
+    pub fn to_be_bytes(&self) -> Vec<u8>{
+        let mut size = std::mem::size_of_val(&self.height);
+        size += self.justify.as_ref().len(); 
+        size += self.parent.as_ref().len(); 
+        size += self.cmds.iter().fold(0, |n, s| n + s.len()); 
+
+        let mut buf = Vec::with_capacity(size); 
+        buf.extend_from_slice(&self.height.to_be_bytes());
+        buf.extend_from_slice(self.justify.as_ref());
+        buf.extend_from_slice(self.parent.as_ref());
+        for c in &self.cmds{
+            buf.extend_from_slice(c.as_bytes()); 
+        }
+        buf
+    }
     
 }
-
-
-#[test]
-fn test_branch(){
-    use std::collections::HashMap; 
-
-    // TreeNode forms a branch.
-    let mut tree = HashMap::new(); 
-    let mut height = 0;
-
-    let genesis = TreeNode::genesis();
-    let end = NodeHash::genesis();
-    let gh = TreeNode::hash(&genesis); 
-    let mut parent = gh.clone(); 
-    tree.insert(gh, genesis);
-    let qc_hash = QCHash::genesis();
-
-    let cmds = vec![
-        vec!["hello".to_string(), "world".to_string()], 
-        vec!["good to see you".to_string()], 
-        vec!["miaomiao?".to_string(), "zhizhi!".to_string()], 
-    ];
-
-    for vc in cmds.clone(){
-        height += 1;
-        let (node, h) = TreeNode::node_and_hash(
-            vc.into_iter(), 
-            height, 
-            parent, 
-            qc_hash.clone(), 
-        );
-        parent = h.as_ref().clone(); 
-        tree.insert(*h, *node);
-    }
-    // from leaf to root 
-    // Should record leaf or its hash.
-    while let Some((_, v)) = tree.get_key_value(&parent){
-        let v: &TreeNode = v;
-        assert!(v.height == height);
-        if height > 0{
-            assert!(&v.cmds == cmds.get(height as usize - 1).unwrap());
-            height -= 1;
-        }
-        parent = v.parent.clone(); 
-        if parent == end{
-            break;
-        }
-    }
-}
- 
 
 #[test]
 fn test_combined_sign(){
