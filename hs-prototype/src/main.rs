@@ -1,5 +1,4 @@
 //! Demo
-
 use std::{
     collections::{
         HashMap, 
@@ -13,187 +12,34 @@ use std::{
     }, 
     sync::{
         mpsc::{Sender, Receiver, channel}, 
-        Mutex, Condvar, Arc,
+        Arc,
     }, 
 };
 
 use log::info; 
 use simplelog::*; 
-use serde::{
-    Serialize, Deserialize, 
-};
 
 mod utils; 
 mod basic;
+mod traits; 
 use utils::*; 
 use basic::*; 
+use traits::*; 
 
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum RequestType{
-    NewView, 
-    Proposal, 
-    Vote, 
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Context{
-    from: ReplicaID, 
-    to: ReplicaID, 
-    view: ViewNumber, 
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RpcRequest{
-    ctx: Context, 
-    msg_type: RequestType, 
-    // proposal 
-    node: Option<Box<TreeNode>>, 
-    // new view msg
-    qc: Option<Box<GenericQC>>, 
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-enum ResponseType{
-    Accpet,     // accept proposal, 
-    Vote,       // will to vote. 
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RpcResponse{
-    ctx: Context, 
-    msg_type: ResponseType, 
-    sign: Option<Box<SignKit>>, 
-    will_to_vote: bool, 
-}
-
-trait HotStuff: SysConf + StateMachine + Pacemaker + Crypto{
-    fn is_leader(&self) -> bool;
-
-    // Return or ignore if self is not the leader. 
-    fn on_recv_vote(&mut self, ctx: &Context, node: &TreeNode, sign: &SignKit); 
-
-    // Return immediately if self is not the leader. 
-    fn on_recv_proposal(&mut self, ctx: &Context, node: &TreeNode); 
-
-    fn on_beat(&mut self, cmds: &Vec<Cmd>);
-
-    fn run(&mut self); 
-
-}
-
-trait SysConf{
-    fn self_id(&self) -> &str;
-
-    fn get_addr(&self, node_id: &String) -> Option<&String>;
-
-    fn threshold(&self) -> usize;
-}
-
-trait Crypto{
-    fn sign_id(&self) -> SignID; 
-
-    fn sign(&self, node:&TreeNode) -> Box<Sign>; 
-    
-    // TODO: return Result
-    fn combine_partial_sign(&self) -> Box<CombinedSign>; 
-}
-
-trait StateMachine: MemPool{
-    fn on_commit(&mut self, node: &TreeNode);
-
-    fn update_nodes(&mut self, node: &TreeNode); 
-
-    fn safe_node(&mut self, node: &TreeNode, qc: &GenericQC) -> bool; 
-
-}
-
-trait Timer{
-    fn reset_timer(&mut self);
-
-    fn tick(&mut self, delta: u64); 
-
-    fn deadline(&self) -> u64; 
-    
-    fn update_deadline(&mut self, deadline: u64); 
-
-    fn touch_deadline(&self) -> bool; 
-}
-
-trait Pacemaker: MemPool + Timer{
-    /// leader election; 
-    fn leader_election(&mut self);
-
-    fn view_change(&mut self); 
-}
-
-trait MemPool{
-    // Append new node into mempool. 
-    fn append_new_node(&mut self, node: &TreeNode);
-
-    fn append_new_qc(&mut self, qc: &GenericQC); 
-
-    fn get_node(&mut self, node_hash: &NodeHash) -> Option<Arc<TreeNode>>; 
-
-    // if node is genesis, return None. 
-    fn find_parent(&self, node: &TreeNode) -> Option<Arc<TreeNode>>;
-
-    // Get GenericQC by node.justify
-    fn find_qc_by_justify(&self, node_hash: &NodeHash) -> Option<Arc<GenericQC>>;
-
-    // Get node through GenericQC.node
-    fn find_node_by_qc(&self, qc_hash: &QCHash) -> Option<Arc<TreeNode>>;
-
-    // b'', b', b
-    fn find_three_chain(&self, node:&NodeHash) -> Vec<Arc<TreeNode>>;
-
-    fn is_continues_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool; 
-
-    fn is_conflicting(&self, a:&TreeNode, b: &TreeNode) -> bool;
-
-    fn get_qc_high(&self) -> Arc<GenericQC>;
-
-    fn update_qc_high(&mut self, qc_node: &TreeNode, qc_high: &GenericQC);
-
-    fn get_leaf(&self) -> Arc<TreeNode>;
-
-    fn update_leaf(&mut self, new_leaf: &TreeNode);
-
-    fn get_locked_node(&self) -> Arc<TreeNode>; 
-
-    fn update_locked_node(&mut self, node: &TreeNode);
-
-    fn get_last_executed(&self) -> Arc<TreeNode>; 
-
-    fn update_last_executed_node(&mut self, node: &TreeNode); 
-
-    fn get_view(&self) -> ViewNumber;
-
-    fn increase_view(&mut self, new_view: ViewNumber);
-
-    // Reset view related status like voting set
-    fn reset(&mut self); 
-
-    // false means duplicate signs from the same replica. 
-    fn add_vote(&mut self, ctx: &Context, sign: &SignKit) -> bool;
-
-    fn vote_set_size(&self) -> usize; 
-}
-
-trait Network{
-    // new round 
-    fn propose(&mut self, node: &TreeNode); 
-
-    // As replica, accept and reply. 
-    fn accept_proposal(&mut self, ctx: &Context, node:&TreeNode, sign: &SignKit); 
-
-    // Broadcast information about new leader. 
-    fn new_leader(&mut self, ctx: &Context, leader: &ReplicaID); 
-}
-
-struct NetworkKit{
+struct NetKit{
     sender: Sender<RpcRequest>, 
     recvr: Receiver<RpcRequest>, 
+}
+
+impl NetKit{
+    fn new() -> (Self, Sender<RpcRequest>, Receiver<RpcRequest>){
+        unimplemented!()
+    }
+
+    fn listening(&mut self){
+
+    }
+
 }
 
 struct Machine{
@@ -206,7 +52,7 @@ struct Machine{
     // viewnumber of last voted treenode.
     vheight: ViewNumber, 
 
-    tick_ch: Receiver<u64>, 
+    tick_ch: Receiver<(u64, u64)>, 
     tick: u64, 
     deadline: u64, 
 
@@ -227,7 +73,7 @@ struct Machine{
 
 impl Machine{
     fn new(
-        tick_ch: Receiver<u64>, 
+        tick_ch: Receiver<(u64, u64)>, 
         peer_conf: HashMap<String, String>, 
         self_id: &String, 
         sign_id: u32,   
@@ -246,28 +92,25 @@ impl Machine{
             leaf_high: 0, 
             qc_high: Arc::new(first_qc), 
             view: 0, 
-            // viewnumber of last voted treenode.
             vheight: 0, 
-
             tick_ch, 
             tick: 0, 
-            // TODO
-            deadline: 1 << 10, 
-
+            deadline: 1, 
             b_executed: Arc::new(node.clone()), 
             b_locked: Arc::new(node.clone()), 
-
             peer_conf, 
             self_id: self_id.clone(),  
             leader_id: None, 
-
             sign_id: sign_id, 
             pks, 
             sks, 
-
             voting_set: HashMap::new(), 
             decided: false,  
         }
+    }
+
+    fn id(&self) -> (String, ViewNumber, u64, u64){
+        (self.self_id.clone(), self.view, self.tick, self.deadline)
     }
 }
 
@@ -302,7 +145,7 @@ impl MemPool for Machine{
         .and_then(|node| Some(node.clone()))
     }
     
-    fn find_three_chain(&self, mut node_hash: &NodeHash) -> Vec<Arc<TreeNode>> {
+    fn find_three_chain(&self, node_hash: &NodeHash) -> Vec<Arc<TreeNode>> {
         let mut chain = Vec::with_capacity(3); 
         // b''
         let mut ptr = node_hash.clone(); 
@@ -477,7 +320,7 @@ impl Timer for Machine{
     }
     
     fn update_deadline(&mut self, deadline: u64){
-        self.deadline = u64::max(self.deadline, deadline);
+        self.deadline = deadline;
     }
 
     fn touch_deadline(&self) -> bool{
@@ -506,7 +349,8 @@ impl Pacemaker for Machine{
 
     fn view_change(&mut self) {
         self.reset(); 
-        self.increase_view(self.get_view() + 1); 
+        self.increase_view(self.view + 1); 
+        info!("{:?} view change", self.id());
     }
 }
 
@@ -554,29 +398,28 @@ impl HotStuff for Machine{
         loop{
 
             // tick. 
-            if let Ok(new_tick) = self.tick_ch.recv(){
-                self.tick = new_tick; 
-                info!("{} tick-{}", self.self_id, new_tick);
+            if let Ok((new_tick, deadline)) = self.tick_ch.recv(){
+                self.tick(new_tick - self.tick); 
+                self.update_deadline(deadline); 
+                info!("{:?} tick", self.id());
+            }else{
+                down = true; 
             }
 
             if self.touch_deadline(){
+                info!("{:?} timeout", self.id());
                 self.view_change(); 
+                self.update_deadline(self.tick + 1); 
                 continue;
             }
             
             // TODO: do something. 
 
-
-            // TODO: remove this. 
-            if self.tick >= 10{
-                down = true; 
-            }
-
             if down{
                 break; 
             }
         }
-        info!("hotstuff node {} down", self.self_id()); 
+        info!("{:?} down", self.id()); 
     }
 
 
@@ -649,6 +492,27 @@ impl HotStuff for Machine{
     }
 }
 
+fn default_timer(tick_sender: Sender<(u64, u64)>, step: u64) -> JoinHandle<()>{
+    spawn(
+        move ||{
+            let mut tick = 0; 
+            // 5 tick per view
+            let mut deadline = tick + 5; 
+            loop{
+                sleep(Duration::from_secs(1)); 
+                if tick >= 20 || tick_sender.send((tick, deadline)).is_err(){
+                    break; 
+                }
+                tick += 1; 
+                if tick > deadline{
+                    deadline += 5; 
+                }
+            }
+            drop(tick_sender);
+        }
+    )
+}
+
 fn test(){
     info!("run demo"); 
     let f = 1; 
@@ -685,18 +549,7 @@ fn test(){
             }
         ); 
         // timer 
-        spawn(
-            move ||{
-                let mut tick = 0; 
-                loop{
-                    sleep(Duration::from_secs(3)); 
-                    if tick_sender.send(tick).is_err(){
-                        break; 
-                    }
-                    tick += 1; 
-                }
-            }
-        ); 
+        default_timer(tick_sender, 5); 
 
         handlers.push(handler); 
     }
