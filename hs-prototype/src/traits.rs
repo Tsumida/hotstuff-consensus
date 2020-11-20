@@ -53,9 +53,6 @@ pub trait HotStuff: SysConf + StateMachine + Pacemaker + Crypto{
     fn on_recv_proposal(&mut self, ctx: &Context, node: &TreeNode); 
 
     fn on_beat(&mut self, cmds: &Vec<Cmd>);
-
-    fn run(&mut self); 
-
 }
 
 pub trait SysConf{

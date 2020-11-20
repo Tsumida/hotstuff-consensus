@@ -10,11 +10,12 @@ rand = ""
 threshold_crypto = { version = "0.4", git = "https://github.com/poanetwork/threshold_crypto" }
 sha2 = ""
 serde = ""
-futures = "0.3"
-tokio = { version = "0.2", features = ["full"] }
+serde_json = ""
 log = "0.4.*"
 simplelog = ""
-async-trait = ""
+tokio = {version = "0.2", features = ["full"]}
+futures = "0.3"
+warp = ""   
 
 # tarpc = { version = "0.22", features =  ["full"]}
 # send and recv serde encodedable types over network using tokio.

@@ -6,18 +6,22 @@ use std::{
     time::{
         Duration
     }, 
-    thread::{
-        spawn, sleep, 
-        JoinHandle,
-    }, 
     sync::{
-        mpsc::{Sender, Receiver, channel}, 
         Arc,
     }, 
+    convert::Infallible, 
 };
 
-use log::info; 
+use tokio::sync::mpsc::{Sender, Receiver, channel}; 
+use tokio::time::delay_for; 
+use tokio::spawn; 
+
+use serde::{Serialize, Deserialize};
+use log::{info, error}; 
 use simplelog::*; 
+use warp::{
+    Filter,
+}; 
 
 mod utils; 
 mod basic;
@@ -26,18 +30,82 @@ use utils::*;
 use basic::*; 
 use traits::*; 
 
+#[derive(Clone, Debug)]
+pub enum InternalMsg{
+    RequestSnapshot(Sender<Box<Snapshot>>), 
+    //ReplySnapshot(Box<Snapshot>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot{
+    view: ViewNumber, 
+    tick: u64, 
+    node_executed: NodeHash, 
+    qc_high: QCHash, 
+}
+
 struct NetKit{
-    sender: Sender<RpcRequest>, 
-    recvr: Receiver<RpcRequest>, 
+    // peer_conf: HashMap<ReplicaID, String>, 
+    self_id: String, 
+    self_port: u16, 
+    sender: Sender<InternalMsg>, 
+    recvr: Receiver<InternalMsg>, 
 }
 
 impl NetKit{
-    fn new() -> (Self, Sender<RpcRequest>, Receiver<RpcRequest>){
-        unimplemented!()
+    fn new(ip: String, port: u16) -> (Self, Sender<InternalMsg>, Receiver<InternalMsg>){
+        let (nk_sender, recvr) = channel(64);
+        let (sender, nk_recvr) = channel(64); 
+
+        let nk = NetKit{
+            self_id: ip, 
+            self_port: port, 
+            sender: nk_sender, 
+            recvr: nk_recvr, 
+        };
+
+        (nk, sender, recvr)
+
     }
 
-    fn listening(&mut self){
+    async fn status(mut sender: Sender<InternalMsg>) -> Result<impl warp::Reply, Infallible>{
+        info!("recv get request"); 
+        let (ss_sender, mut ss_recvr) = channel(1); 
+        if let Err(e) = sender.send(InternalMsg::RequestSnapshot(ss_sender)).await{
+            error!("{}", e); 
+            return Ok(format!("internal error in sending")); 
+        }
 
+        match ss_recvr.recv().await{
+            Some(snapshot) => Ok(serde_json::to_string(snapshot.as_ref()).unwrap()),
+            None => {
+                error!("sender dropped"); 
+                Ok(format!("internal error in reply"))
+            }, 
+        }
+    }
+
+
+    // Warp adapter. 
+    fn new_sender(sender: Sender<InternalMsg>) 
+        -> impl Filter<Extract = (Sender<InternalMsg>,), Error = std::convert::Infallible> + Clone
+    {
+        warp::any().map(move || sender.clone())
+    }
+
+    async fn listening(&self){
+        info!("netkit is listening"); 
+        let sender = self.sender.clone(); 
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], self.self_port as u16));
+        let router = 
+            warp::path::path("status")
+            .and(NetKit::new_sender(sender.clone()))
+            .and_then(NetKit::status); 
+
+        warp::serve(router)
+        .run(addr)
+        .await;
+        info!("netkit down"); 
     }
 
 }
@@ -69,22 +137,27 @@ struct Machine{
 
     voting_set: HashMap<ReplicaID, SignKit>, 
     decided: bool, 
+
+    net_in: Receiver<InternalMsg>, 
+    net_out: Sender<InternalMsg>, 
 }
 
 impl Machine{
     fn new(
-        tick_ch: Receiver<(u64, u64)>, 
-        peer_conf: HashMap<String, String>, 
         self_id: &String, 
         sign_id: u32,   
         pks: PK, 
-        sks: SK) -> Machine
+        sks: SK,
+        tick_ch: Receiver<(u64, u64)>, 
+        net_ch: (Sender<InternalMsg>, Receiver<InternalMsg>), 
+        peer_conf: HashMap<String, String>, ) -> Machine
     {
         let node = TreeNode::genesis(); 
         let first_qc = GenericQC::genesis(0, &node); 
         let mut qc_map = HashMap::with_capacity(4); 
         qc_map.insert(GenericQC::hash(&first_qc), Arc::new(first_qc.clone())); 
 
+        let (net_out, net_in) = net_ch; 
         Machine{
             node_pool: HashMap::new(), 
             qc_map,
@@ -106,6 +179,8 @@ impl Machine{
             sks, 
             voting_set: HashMap::new(), 
             decided: false,  
+            net_in, 
+            net_out, 
         }
     }
 
@@ -393,36 +468,6 @@ impl Crypto for Machine{
 
 impl HotStuff for Machine{
 
-    fn run(&mut self) {
-        let mut down = false; 
-        loop{
-
-            // tick. 
-            if let Ok((new_tick, deadline)) = self.tick_ch.recv(){
-                self.tick(new_tick - self.tick); 
-                self.update_deadline(deadline); 
-                info!("{:?} tick", self.id());
-            }else{
-                down = true; 
-            }
-
-            if self.touch_deadline(){
-                info!("{:?} timeout", self.id());
-                self.view_change(); 
-                self.update_deadline(self.tick + 1); 
-                continue;
-            }
-            
-            // TODO: do something. 
-
-            if down{
-                break; 
-            }
-        }
-        info!("{:?} down", self.id()); 
-    }
-
-
     fn is_leader(&self) -> bool {
         self.leader_id
         .as_ref()
@@ -492,29 +537,94 @@ impl HotStuff for Machine{
     }
 }
 
-fn default_timer(tick_sender: Sender<(u64, u64)>, step: u64) -> JoinHandle<()>{
-    spawn(
-        move ||{
+fn default_timer(mut tick_sender: Sender<(u64, u64)>, lifetime: u64, step: u64){
+    tokio::spawn(
+        async move {
+            let step = step; 
             let mut tick = 0; 
             // 5 tick per view
-            let mut deadline = tick + 5; 
+            let mut deadline = tick + step; 
             loop{
-                sleep(Duration::from_secs(1)); 
-                if tick >= 20 || tick_sender.send((tick, deadline)).is_err(){
+                delay_for(Duration::from_secs(1)).await; 
+                if tick >= lifetime || tick_sender.send((tick, deadline)).await.is_err(){
                     break; 
                 }
                 tick += 1; 
                 if tick > deadline{
-                    deadline += 5; 
+                    deadline += step; 
                 }
             }
             drop(tick_sender);
         }
-    )
+    );
 }
 
-fn test(){
-    info!("run demo"); 
+impl Machine{
+    async fn run(&mut self, net_kit: NetKit) {
+        let mut down = false; 
+        spawn(
+            async move {
+                net_kit.listening().await;
+            }
+        );
+        loop{
+            
+            // TODO: do something. 
+            tokio::select! {
+                // process tick
+                tick = self.tick_ch.recv() => {
+                    match tick{
+                        Some((new_tick, deadline)) => {
+                            self.tick(new_tick - self.tick); 
+                            self.update_deadline(deadline); 
+                            // info!("{:?} tick", self.id());
+                            if self.touch_deadline(){
+                                info!("{:?} timeout", self.id());
+                                self.view_change(); 
+                                self.update_deadline(self.tick + 1); 
+                                continue;
+                            }
+                        }, 
+                        None => {
+                            down = true; 
+                        }, 
+                    }
+                }, 
+                Some(request) = self.net_in.recv() => {
+                    self.process_net_request(request).await; 
+                }, 
+            }
+
+            if down{
+                break; 
+            }
+        }
+        info!("{:?} down", self.id()); 
+    }
+
+    async fn process_net_request(&mut self, req: InternalMsg){
+        match req{
+            InternalMsg::RequestSnapshot(mut sender) => {
+                let ss = Box::new(
+                    Snapshot{
+                        view: self.view, 
+                        tick: self.tick, 
+                        node_executed: TreeNode::hash(self.get_last_executed().as_ref()), 
+                        qc_high: GenericQC::hash(self.get_qc_high().as_ref()), 
+                    }
+                ); 
+
+                // self.net_out.send(InternalMsg::ReplySnapshot(ss)).await.unwrap();
+                sender.send(ss).await.unwrap();
+            }, 
+            _ => error!("recv invalid msg"), 
+        }
+    }
+}
+
+fn demo() -> Vec<Receiver<()>>{
+    info!("hotstuff demo"); 
+    info!("hotstuff node ({}) Bytes", std::mem::size_of::<Machine>());
     let f = 1; 
     let n = 3 * f + 1;
     let peer_config = (0..n)
@@ -525,45 +635,51 @@ fn test(){
 
     // run machines. 
     let mut handlers = vec![]; 
-
     // peer_conf dos not live enough. 
     let backup = peer_config.clone(); 
     for (kv, sk_conf) in peer_config.into_iter().zip(sk){
         // TODO: unbounded channel
-        let (tick_sender, tick_recvr) = channel(); 
+        let (mut stop, handler) = channel(1); 
+        let (tick_sender, tick_recvr) = channel(16); 
         let (k, _) = kv; 
         let (sign_id, sks) = sk_conf; 
         let peers = backup.clone(); 
         let pks = pks.clone(); 
-        let handler = spawn(
-            move || {
-                let mut mc = Machine::new(
-                    tick_recvr, 
-                    peers,
-                    &k, 
-                    sign_id as u32, 
-                    pks, 
-                    sks, 
-                );
-                mc.run(); 
+        let (net_kit, net_out, net_in) = NetKit::new(format!("localhost"), 8000+sign_id as u16); 
+        let mc = Machine::new(
+            &k, 
+            sign_id as u32, 
+            pks, 
+            sks, 
+            tick_recvr, 
+            (net_out, net_in),
+            peers,
+        );
+
+        spawn(
+            async move {
+                let mut mc = mc;
+                mc.run(net_kit).await; 
+                stop.send(()).await.unwrap(); 
             }
         ); 
         // timer 
-        default_timer(tick_sender, 5); 
-
+        default_timer(tick_sender, 100, 5); 
         handlers.push(handler); 
     }
-
-    // handlers...
-    handlers.into_iter().for_each(|h| h.join().unwrap()); 
+    
+    handlers
 }
 
-fn main(){
+#[tokio::main]
+async fn main() -> (){
     let _ = CombinedLogger::init(
         vec![
             TermLogger::new(LevelFilter::Info, Config::default(),TerminalMode::Mixed), 
         ], 
     );
-
-    test()
+    
+    for mut h in demo(){
+        h.recv().await.unwrap(); 
+    }
 }
