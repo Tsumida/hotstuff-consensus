@@ -9,19 +9,15 @@ use std::{
     sync::{
         Arc,
     }, 
-    convert::Infallible, 
 };
 
 use tokio::sync::mpsc::{Sender, Receiver, channel}; 
 use tokio::time::delay_for; 
 use tokio::spawn; 
-
+use actix_web::{get, web, App, HttpServer, Responder};
 use serde::{Serialize, Deserialize};
 use log::{info, error}; 
 use simplelog::*; 
-use warp::{
-    Filter,
-}; 
 
 mod utils; 
 mod basic;
@@ -32,8 +28,10 @@ use traits::*;
 
 #[derive(Clone, Debug)]
 pub enum InternalMsg{
-    RequestSnapshot(Sender<Box<Snapshot>>), 
-    //ReplySnapshot(Box<Snapshot>),
+    RequestSnapshot(Sender<Box<Snapshot>>),
+    Sign(Sender<(Context, Arc<TreeNode>, Box<Sign>)>), 
+    RecvProposal(Context, Arc<TreeNode>), 
+    Propose(Context, Arc<TreeNode>, Sender<ViewNumber>), 
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,12 +42,28 @@ pub struct Snapshot{
     qc_high: QCHash, 
 }
 
+const PROP_COMMITTED: &str = "committed"; 
+const PROP_LOCKED: &str = "locked"; 
+const PROP_QUEUING: &str = "queuing"; 
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProposalState{
+    view: ViewNumber, 
+    // committed, locked, 
+    state: &'static str, 
+    // node_hash
+}
+
 struct NetKit{
     // peer_conf: HashMap<ReplicaID, String>, 
     self_id: String, 
     self_port: u16, 
     sender: Sender<InternalMsg>, 
     recvr: Receiver<InternalMsg>, 
+}
+
+struct InternalSender{
+    sender: Sender<InternalMsg>, 
 }
 
 impl NetKit{
@@ -68,44 +82,27 @@ impl NetKit{
 
     }
 
-    async fn status(mut sender: Sender<InternalMsg>) -> Result<impl warp::Reply, Infallible>{
-        info!("recv get request"); 
+    async fn status(data: web::Data<InternalSender>) -> String{
         let (ss_sender, mut ss_recvr) = channel(1); 
-        if let Err(e) = sender.send(InternalMsg::RequestSnapshot(ss_sender)).await{
+        let mut sender = data.sender.clone(); 
+        if let Err(e) = sender.send(
+            InternalMsg::RequestSnapshot(
+                ss_sender
+            )
+        ).await{
             error!("{}", e); 
-            return Ok(format!("internal error in sending")); 
+            return format!("internal error"); 
         }
 
         match ss_recvr.recv().await{
-            Some(snapshot) => Ok(serde_json::to_string(snapshot.as_ref()).unwrap()),
             None => {
-                error!("sender dropped"); 
-                Ok(format!("internal error in reply"))
+                error!("sender dropped early"); 
+                format!("internal error")
             }, 
+            Some(ss) => 
+                serde_json::to_string(ss.as_ref()).unwrap(), 
         }
-    }
 
-
-    // Warp adapter. 
-    fn new_sender(sender: Sender<InternalMsg>) 
-        -> impl Filter<Extract = (Sender<InternalMsg>,), Error = std::convert::Infallible> + Clone
-    {
-        warp::any().map(move || sender.clone())
-    }
-
-    async fn listening(&self){
-        info!("netkit is listening"); 
-        let sender = self.sender.clone(); 
-        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], self.self_port as u16));
-        let router = 
-            warp::path::path("status")
-            .and(NetKit::new_sender(sender.clone()))
-            .and_then(NetKit::status); 
-
-        warp::serve(router)
-        .run(addr)
-        .await;
-        info!("netkit down"); 
     }
 
 }
@@ -119,6 +116,7 @@ struct Machine{
     view: ViewNumber, 
     // viewnumber of last voted treenode.
     vheight: ViewNumber, 
+    commit_height: ViewNumber, 
 
     tick_ch: Receiver<(u64, u64)>, 
     tick: u64, 
@@ -166,6 +164,7 @@ impl Machine{
             qc_high: Arc::new(first_qc), 
             view: 0, 
             vheight: 0, 
+            commit_height: 0, 
             tick_ch, 
             tick: 0, 
             deadline: 1, 
@@ -370,7 +369,9 @@ impl StateMachine for Machine{
         if b_exec.height < node.height{
             if let Some(parent) = self.get_node(&node.parent).clone(){
                 self.on_commit(parent.as_ref());
+                // execute node. 
             }
+            self.commit_height = node.height;
         }
     }
 
@@ -403,16 +404,27 @@ impl Timer for Machine{
     }
 }
 
+#[async_trait::async_trait]
 impl Network for Machine{
-    fn propose(&mut self, node: &TreeNode) {
+    async fn propose(&mut self, node: &TreeNode) {
+        /*
+        self.net_out.send(
+            InternalMsg::Propose(
+                Context{
+                    view: self.get_view(), 
+                    from: self.self_id.clone(), 
+                }, 
+                Arc::new(node.clone()), 
+            )
+        ).await.unwrap(); 
+        */
+    }
+
+    async fn accept_proposal(&mut self, ctx: &Context, node: &TreeNode, sign: &SignKit) {
         unimplemented!()
     }
 
-    fn accept_proposal(&mut self, ctx: &Context, node:&TreeNode, sign: &SignKit) {
-        unimplemented!()
-    }
-
-    fn new_leader(&mut self, ctx: &Context, leader: &ReplicaID) {
+    async fn new_leader(&mut self, ctx: &Context, leader: &ReplicaID) {
         unimplemented!()
     }
 }
@@ -560,13 +572,9 @@ fn default_timer(mut tick_sender: Sender<(u64, u64)>, lifetime: u64, step: u64){
 }
 
 impl Machine{
-    async fn run(&mut self, net_kit: NetKit) {
+    async fn run(&mut self) {
         let mut down = false; 
-        spawn(
-            async move {
-                net_kit.listening().await;
-            }
-        );
+        
         loop{
             
             // TODO: do something. 
@@ -575,15 +583,7 @@ impl Machine{
                 tick = self.tick_ch.recv() => {
                     match tick{
                         Some((new_tick, deadline)) => {
-                            self.tick(new_tick - self.tick); 
-                            self.update_deadline(deadline); 
-                            // info!("{:?} tick", self.id());
-                            if self.touch_deadline(){
-                                info!("{:?} timeout", self.id());
-                                self.view_change(); 
-                                self.update_deadline(self.tick + 1); 
-                                continue;
-                            }
+                            self.process_tick(new_tick, deadline); 
                         }, 
                         None => {
                             down = true; 
@@ -600,6 +600,17 @@ impl Machine{
             }
         }
         info!("{:?} down", self.id()); 
+    }
+
+    fn process_tick(&mut self, new_tick:u64, deadline: u64){
+        self.tick(new_tick - self.tick); 
+        self.update_deadline(deadline); 
+        // info!("{:?} tick", self.id());
+        if self.touch_deadline(){
+            info!("{:?} timeout", self.id());
+            self.view_change(); 
+            self.update_deadline(self.tick + 1); 
+        }
     }
 
     async fn process_net_request(&mut self, req: InternalMsg){
@@ -622,9 +633,16 @@ impl Machine{
     }
 }
 
-fn demo() -> Vec<Receiver<()>>{
+fn main(){
+    let _ = CombinedLogger::init(
+        vec![
+            TermLogger::new(LevelFilter::Info, Config::default(),TerminalMode::Mixed), 
+        ], 
+    );
+    
     info!("hotstuff demo"); 
     info!("hotstuff node ({}) Bytes", std::mem::size_of::<Machine>());
+
     let f = 1; 
     let n = 3 * f + 1;
     let peer_config = (0..n)
@@ -634,7 +652,10 @@ fn demo() -> Vec<Receiver<()>>{
     let (_, pks, sk) = threshold_sign_kit(n, 2*f); 
 
     // run machines. 
+    let mut mcs = vec![]; 
     let mut handlers = vec![]; 
+    let mut nks = vec![]; 
+    let mut timers = vec![];
     // peer_conf dos not live enough. 
     let backup = peer_config.clone(); 
     for (kv, sk_conf) in peer_config.into_iter().zip(sk){
@@ -655,31 +676,73 @@ fn demo() -> Vec<Receiver<()>>{
             (net_out, net_in),
             peers,
         );
-
-        spawn(
-            async move {
-                let mut mc = mc;
-                mc.run(net_kit).await; 
-                stop.send(()).await.unwrap(); 
-            }
-        ); 
+        let addr = mc.get_addr(&mc.self_id).unwrap().clone(); 
+        
         // timer 
-        default_timer(tick_sender, 100, 5); 
+        timers.push(tick_sender); 
         handlers.push(handler); 
+        mcs.push((mc, stop)); 
+        nks.push(net_kit); 
     }
-    
-    handlers
+
+    let tokio_rt_handler = std::thread::spawn(
+        move || {
+            tokio::runtime::Runtime::new().unwrap().block_on(
+                async move {
+                    for (mc, tick_sender) in mcs.into_iter().zip(timers){
+                        
+                        default_timer(tick_sender, 100, 5);
+                        spawn(
+                            async move {
+                                let (mut mc, mut stop) = mc;
+                                mc.run().await; 
+                                stop.send(()).await.unwrap(); 
+                            }
+                        ); 
+                    }
+        
+                    for mut h in handlers{
+                        h.recv().await.unwrap(); 
+                    }
+                }
+            );
+        }
+    );
+
+    let actix_web_rt_handler = std::thread::spawn(
+        move || {
+            actix_web::rt::Runtime::new().unwrap().block_on(
+                run_proxy(nks)
+            ) 
+        }
+    );
+
+    tokio_rt_handler.join().unwrap(); 
 }
 
-#[tokio::main]
-async fn main() -> (){
-    let _ = CombinedLogger::init(
-        vec![
-            TermLogger::new(LevelFilter::Info, Config::default(),TerminalMode::Mixed), 
-        ], 
-    );
-    
-    for mut h in demo(){
-        h.recv().await.unwrap(); 
+async fn run_proxy(nks: Vec<NetKit>){
+    for net_kit in nks{
+        let local = tokio::task::LocalSet::new(); 
+        let sys = actix_web::rt::System::run_in_tokio("hotstuff proxy", &local); 
+        let sender = net_kit.sender.clone(); 
+        info!("netkit is listening"); 
+        let addr = format!("{}:{}", net_kit.self_id.clone(), net_kit.self_port);
+
+        HttpServer::new(move ||{
+            App::new()
+            .data(
+                // shared state
+                InternalSender{
+                    sender: sender.clone(), 
+                }
+            )
+            .service(
+                web::scope("/hotstuff").route("status", web::get().to(NetKit::status))
+            )
+        })
+        .bind(addr).unwrap()
+        .run()
+        .await.unwrap(); 
+        sys.await.unwrap();
     }
 }

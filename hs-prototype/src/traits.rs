@@ -15,32 +15,7 @@ pub enum RequestType{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context{
     pub from: ReplicaID, 
-    pub to: ReplicaID, 
     pub view: ViewNumber, 
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RpcRequest{
-    ctx: Context, 
-    msg_type: RequestType, 
-    // proposal 
-    node: Option<Box<TreeNode>>, 
-    // new view msg
-    qc: Option<Box<GenericQC>>, 
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ResponseType{
-    Accpet,     // accept proposal, 
-    Vote,       // will to vote. 
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RpcResponse{
-    ctx: Context, 
-    msg_type: ResponseType, 
-    sign: Option<Box<SignKit>>, 
-    will_to_vote: bool, 
 }
 
 pub trait HotStuff: SysConf + StateMachine + Pacemaker + Crypto{
@@ -153,13 +128,14 @@ pub trait MemPool{
     fn vote_set_size(&self) -> usize; 
 }
 
+#[async_trait::async_trait]
 pub trait Network{
     // new round 
-    fn propose(&mut self, node: &TreeNode); 
+    async fn propose(&mut self, node: &TreeNode); 
 
     // As replica, accept and reply. 
-    fn accept_proposal(&mut self, ctx: &Context, node:&TreeNode, sign: &SignKit); 
+    async fn accept_proposal(&mut self, ctx: &Context, node:&TreeNode, sign: &SignKit); 
 
     // Broadcast information about new leader. 
-    fn new_leader(&mut self, ctx: &Context, leader: &ReplicaID); 
+    async fn new_leader(&mut self, ctx: &Context, leader: &ReplicaID); 
 }
