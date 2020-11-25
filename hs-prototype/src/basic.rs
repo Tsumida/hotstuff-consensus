@@ -97,12 +97,6 @@ impl GenericQC{
         }
     }
 
-    /*
-    pub fn is_bootstrapping_qc(&self) -> bool{
-        self.combined_sign.is_none()
-    }
-    */
-
     pub fn hash(&self) -> QCHash{
         let mut res = [0u8; 32]; 
         if let Some(ref v) = self.combined_sign{

@@ -15,7 +15,9 @@ log = "0.4.*"
 simplelog = ""
 tokio = {version = "0.2", features = ["full"]}
 futures = "0.3"
-warp = ""   
+async-trait = ""
+actix-web = "3"
+base64 = ""
 
 # tarpc = { version = "0.22", features =  ["full"]}
 # send and recv serde encodedable types over network using tokio.

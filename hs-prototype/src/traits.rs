@@ -1,9 +1,10 @@
+
+use std::sync::Arc; 
 use serde::{
     Serialize, Deserialize, 
 };
-use std::sync::Arc; 
+use tokio::sync::mpsc::{Sender, Receiver};
 use crate::basic::*;
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestType{
@@ -18,16 +19,20 @@ pub struct Context{
     pub view: ViewNumber, 
 }
 
-pub trait HotStuff: SysConf + StateMachine + Pacemaker + Crypto{
+#[async_trait::async_trait]
+pub trait HotStuff: SysConf + StateMachine + Crypto{
     fn is_leader(&self) -> bool;
 
     // Return or ignore if self is not the leader. 
-    fn on_recv_vote(&mut self, ctx: &Context, node: &TreeNode, sign: &SignKit); 
+    async fn on_recv_vote(&mut self, ctx: &Context, node: &TreeNode, sign: &SignKit); 
 
     // Return immediately if self is not the leader. 
-    fn on_recv_proposal(&mut self, ctx: &Context, node: &TreeNode); 
+    async fn on_recv_proposal(&mut self, ctx: &Context, node: &TreeNode, justify:&GenericQC, sender: Sender<(Context, Box<TreeNode>, Box<SignKit>)>); 
 
-    fn on_beat(&mut self, cmds: &Vec<Cmd>);
+    async fn on_beat(&mut self, cmds: &Vec<Cmd>);
+
+    async fn propose(&mut self, node: &TreeNode, qc_high: Arc<GenericQC>); 
+
 }
 
 pub trait SysConf{
@@ -52,7 +57,7 @@ pub trait StateMachine: MemPool{
 
     fn update_nodes(&mut self, node: &TreeNode); 
 
-    fn safe_node(&mut self, node: &TreeNode, qc: &GenericQC) -> bool; 
+    fn safe_node(&mut self, node: &TreeNode, prev_node: &TreeNode) -> bool; 
 
 }
 
@@ -68,11 +73,12 @@ pub trait Timer{
     fn touch_deadline(&self) -> bool; 
 }
 
-pub trait Pacemaker: MemPool + Timer{
-    /// leader election; 
-    fn leader_election(&mut self);
+#[async_trait::async_trait]
+pub trait Pacemaker{
+    /// Start leader election.
+    async fn leader_election(&mut self);
 
-    fn view_change(&mut self); 
+    async fn view_change(&mut self); 
 }
 
 pub trait MemPool{
@@ -81,19 +87,21 @@ pub trait MemPool{
 
     fn append_new_qc(&mut self, qc: &GenericQC); 
 
-    fn get_node(&mut self, node_hash: &NodeHash) -> Option<Arc<TreeNode>>; 
+    fn get_node(&self, node_hash: &NodeHash) -> Option<Arc<TreeNode>>; 
+
+    fn get_qc(&self, qc_hash: &QCHash) -> Option<Arc<GenericQC>>; 
 
     // if node is genesis, return None. 
     fn find_parent(&self, node: &TreeNode) -> Option<Arc<TreeNode>>;
 
-    // Get GenericQC by node.justify
+    // Get GenericQC by node.justify, and node should be in node pool already. 
     fn find_qc_by_justify(&self, node_hash: &NodeHash) -> Option<Arc<GenericQC>>;
 
-    // Get node through GenericQC.node
+    // Get node through GenericQC.node, and qc should be in node pool already.
     fn find_node_by_qc(&self, qc_hash: &QCHash) -> Option<Arc<TreeNode>>;
 
     // b'', b', b
-    fn find_three_chain(&self, node:&NodeHash) -> Vec<Arc<TreeNode>>;
+    fn find_three_chain(&self, node: &TreeNode) -> Vec<Arc<TreeNode>>;
 
     fn is_continues_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool; 
 
@@ -126,16 +134,4 @@ pub trait MemPool{
     fn add_vote(&mut self, ctx: &Context, sign: &SignKit) -> bool;
 
     fn vote_set_size(&self) -> usize; 
-}
-
-#[async_trait::async_trait]
-pub trait Network{
-    // new round 
-    async fn propose(&mut self, node: &TreeNode); 
-
-    // As replica, accept and reply. 
-    async fn accept_proposal(&mut self, ctx: &Context, node:&TreeNode, sign: &SignKit); 
-
-    // Broadcast information about new leader. 
-    async fn new_leader(&mut self, ctx: &Context, leader: &ReplicaID); 
 }
