@@ -36,7 +36,6 @@ impl NodeHash{
     pub fn genesis() -> NodeHash{
         NodeHash([0xAB; 32])
     }
-    // pub const fn byte_len() -> usize{ 256 }
 }
 
 
@@ -46,12 +45,13 @@ impl std::convert::AsRef<[u8]> for NodeHash{
     }
 }
 
+/*
 pub fn sign(sk:&SK, node: &TreeNode, view: u64) -> Sign{
     let mut buf: Vec<u8> = Vec::with_capacity(264);  // 256 + 8
     buf.extend(TreeNode::hash(&node).0.iter()); 
     buf.extend(view.to_be_bytes().iter());
     sk.sign(&buf)
-}
+}*/
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QCHash(pub [u8; 32]);
@@ -66,8 +66,6 @@ impl QCHash{
     pub fn genesis() -> QCHash{
         QCHash([0; 32])
     }
-
-    // pub const fn byte_len() -> usize {256}
 }
 
 
@@ -105,6 +103,23 @@ impl GenericQC{
         // None -> [0u8; 32]
         QCHash(res)
     }   
+    
+    pub fn to_be_bytes(&self) -> Vec<u8>{
+        let size = 8 
+        + std::mem::size_of::<NodeHash>() 
+        + if self.combined_sign.is_some(){
+            96
+        }else{ 0 }; 
+
+        let mut buf = Vec::with_capacity(size); 
+        buf.extend_from_slice(&self.view.to_be_bytes()); 
+        buf.extend_from_slice(&self.node.as_ref());
+        if self.combined_sign.is_some(){
+            buf.extend_from_slice(&self.combined_sign.as_ref().unwrap().to_bytes());
+        }   
+
+        buf
+    }
 }
 
 
@@ -140,17 +155,6 @@ impl TreeNode{
         NodeHash(res)
     }
 
-    /*
-    #[inline]
-    pub fn new(cmds: impl IntoIterator<Item=Cmd>, height: u64, parent: NodeHash, justify: QCHash) -> TreeNode{
-        TreeNode{
-            cmds: cmds.into_iter().collect::<Vec<Cmd>>(), 
-            height, 
-            parent,
-            justify, 
-        }
-    }*/
-
     pub fn node_and_hash<'a>(cmds: impl IntoIterator<Item=&'a Cmd>, height: u64, parent: &NodeHash, justify: &QCHash) -> (Box<TreeNode>, Box<NodeHash>){
         let node = Box::new(TreeNode{
             cmds: cmds.into_iter().cloned().collect::<Vec<Cmd>>(), 
@@ -179,38 +183,4 @@ impl TreeNode{
         }
         buf
     }
-    
-}
-
-#[test]
-fn test_combined_sign(){
-
-    let f = 1; 
-    let n = 3 * f + 1;
-    let (_, pks, vec_sk) = crate::utils::threshold_sign_kit(n, 2*f);
-    let msg = "Hello, world!"; 
-
-    let signs = vec_sk.iter()
-        .map(|(_, s)| s.sign(msg))
-        .collect::<Vec<Sign>>(); 
-
-    // verify all partial signature. 
-    assert!(
-        signs.iter()
-        .enumerate()
-        .map(|(i, sk)| pks.public_key_share(i).verify(sk, msg))
-        .fold(true, |s, d| s & d)
-    );
-
-    // combined_sig
-    // it needs (usize, &Sign)... - - 
-    let tmp = signs.iter()
-        .enumerate()
-        .map(|(i, s)| (i, s))
-        .collect::<Vec<_>>(); 
-    let combined_sig = pks.combine_signatures(tmp).expect("signs mismatch");
-
-    assert!(
-        pks.public_key().verify(&combined_sig, msg)
-    );
 }

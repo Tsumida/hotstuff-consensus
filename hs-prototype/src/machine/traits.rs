@@ -3,20 +3,17 @@ use std::sync::Arc;
 use serde::{
     Serialize, Deserialize, 
 };
-use tokio::sync::mpsc::{Sender, Receiver};
-use crate::basic::*;
+
+use tokio::sync::mpsc::Sender;
+
+use crate::machine::basic::*;
+use crate::machine::msg::Context; 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestType{
     NewView, 
     Proposal, 
     Vote, 
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Context{
-    pub from: ReplicaID, 
-    pub view: ViewNumber, 
 }
 
 #[async_trait::async_trait]
@@ -71,14 +68,6 @@ pub trait Timer{
     fn update_deadline(&mut self, deadline: u64); 
 
     fn touch_deadline(&self) -> bool; 
-}
-
-#[async_trait::async_trait]
-pub trait Pacemaker{
-    /// Start leader election.
-    async fn leader_election(&mut self);
-
-    async fn view_change(&mut self); 
 }
 
 pub trait MemPool{
