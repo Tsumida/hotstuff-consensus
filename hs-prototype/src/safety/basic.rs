@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-use std::{hash::Hash, ops::Deref};
+use std::hash::Hash;
 
 use serde::{Deserialize, Serialize};
 
@@ -9,47 +9,13 @@ pub type Sign = threshold_crypto::SignatureShare;
 pub type CombinedSign = threshold_crypto::Signature;
 pub type ReplicaID = String;
 pub type ViewNumber = u64;
-pub type SignID = usize;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Txn(Vec<u8>);
-
-impl AsRef<[u8]> for Txn {
-    fn as_ref(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl Txn {
-    pub fn new(cont: impl AsRef<[u8]>) -> Self {
-        Txn(cont.as_ref().to_vec())
-    }
-}
+pub type Cmd = String;
+pub type SignID = u32;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SignKit {
-    sign: Sign,
-    sign_id: SignID,
-}
-
-impl SignKit {
-    #[inline]
-    pub fn sign(&self) -> &Sign {
-        &self.sign
-    }
-    #[inline]
-    pub fn sign_id(&self) -> &SignID {
-        &self.sign_id
-    }
-}
-
-impl std::convert::From<(Sign, SignID)> for SignKit {
-    fn from(v: (Sign, SignID)) -> Self {
-        Self {
-            sign: v.0,
-            sign_id: v.1,
-        }
-    }
+    pub sign: Sign,
+    pub sign_id: SignID,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -72,6 +38,14 @@ impl std::convert::AsRef<[u8]> for NodeHash {
         return &self.0;
     }
 }
+
+/*
+pub fn sign(sk:&SK, node: &TreeNode, view: u64) -> Sign{
+    let mut buf: Vec<u8> = Vec::with_capacity(264);  // 256 + 8
+    buf.extend(TreeNode::hash(&node).0.iter());
+    buf.extend(view.to_be_bytes().iter());
+    sk.sign(&buf)
+}*/
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct QCHash(pub [u8; 32]);
@@ -114,7 +88,6 @@ impl GenericQC {
         }
     }
 
-    // TODO: refactor
     pub fn hash(&self) -> QCHash {
         let mut res = [0u8; 32];
         if let Some(ref v) = self.combined_sign {
@@ -142,8 +115,7 @@ impl GenericQC {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TreeNode {
     pub height: u64, // height === viewNumber
-    // pub txs: Vec<Cmd>,
-    pub txs: Vec<Txn>,
+    pub cmds: Vec<Cmd>,
     pub parent: NodeHash,
     pub justify: QCHash,
 }
@@ -152,7 +124,7 @@ impl TreeNode {
     pub fn genesis() -> TreeNode {
         TreeNode {
             height: 0,
-            txs: vec![],
+            cmds: vec![],
             parent: NodeHash::genesis(),
             justify: QCHash::genesis(),
         }
@@ -161,7 +133,7 @@ impl TreeNode {
     /// Hash using sha256.
     pub fn hash(node: &TreeNode) -> NodeHash {
         let mut h = Sha256::default();
-        for s in &node.txs {
+        for s in &node.cmds {
             h.update(s);
         }
         h.update(node.height.to_be_bytes());
@@ -173,13 +145,13 @@ impl TreeNode {
     }
 
     pub fn node_and_hash<'a>(
-        txs: impl IntoIterator<Item = &'a Txn>,
+        cmds: impl IntoIterator<Item = &'a Cmd>,
         height: u64,
         parent: &NodeHash,
         justify: &QCHash,
     ) -> (Box<TreeNode>, Box<NodeHash>) {
         let node = Box::new(TreeNode {
-            txs: txs.into_iter().cloned().collect::<Vec<Txn>>(),
+            cmds: cmds.into_iter().cloned().collect::<Vec<Cmd>>(),
             height,
             parent: parent.clone(),
             justify: justify.clone(),
@@ -194,14 +166,14 @@ impl TreeNode {
         let mut size = std::mem::size_of_val(&self.height);
         size += self.justify.as_ref().len();
         size += self.parent.as_ref().len();
-        size += self.txs.iter().fold(0, |n, s| n + s.as_ref().len());
+        size += self.cmds.iter().fold(0, |n, s| n + s.len());
 
         let mut buf = Vec::with_capacity(size);
         buf.extend_from_slice(&self.height.to_be_bytes());
         buf.extend_from_slice(self.justify.as_ref());
         buf.extend_from_slice(self.parent.as_ref());
-        for c in &self.txs {
-            buf.extend_from_slice(c.as_ref());
+        for c in &self.cmds {
+            buf.extend_from_slice(c.as_bytes());
         }
         buf
     }

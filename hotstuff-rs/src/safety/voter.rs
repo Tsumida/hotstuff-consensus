@@ -14,6 +14,9 @@ pub enum VoteErr {
 
     #[error("voting in view={0} is decided")]
     RoundDecided(ViewNumber),
+
+    #[error("Need at least {0} signatures, only {1} offered")]
+    InsufficientSigns(usize, usize),
 }
 
 pub struct Voter {
@@ -49,7 +52,13 @@ impl Voter {
         Box::new(s)
     }
 
-    pub fn combine_partial_sign(&mut self) -> Box<CombinedSign> {
+    pub fn combine_partial_sign(&mut self) -> Result<Box<CombinedSign>, VoteErr> {
+        if self.vote_set_size() <= self.pks.threshold() {
+            return Err(VoteErr::InsufficientSigns(
+                self.pks.threshold() + 1,
+                self.vote_set_size(),
+            ));
+        }
         self.decide();
 
         // wrapper
@@ -59,7 +68,7 @@ impl Voter {
             .map(|kit| (*kit.sign_id() as usize, kit.sign()))
             .collect::<Vec<_>>();
 
-        Box::new(self.pks.combine_signatures(tmp).unwrap())
+        Ok(Box::new(self.pks.combine_signatures(tmp).unwrap()))
     }
 
     pub fn reset(&mut self, new_view: ViewNumber) {

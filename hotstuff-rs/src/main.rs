@@ -8,6 +8,9 @@ mod safety_storage;
 mod traits;
 mod utils;
 
+#[cfg(test)]
+mod tests;
+
 fn main() {
     let _ = CombinedLogger::init(vec![TermLogger::new(
         LevelFilter::Info,
