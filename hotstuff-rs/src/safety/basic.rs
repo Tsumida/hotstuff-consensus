@@ -172,6 +172,24 @@ impl TreeNode {
         NodeHash(res)
     }
 
+    pub fn new<'a>(
+        txs: impl IntoIterator<Item = &'a Txn>,
+        height: u64,
+        parent: &NodeHash,
+        justify: &QCHash,
+    ) -> Box<TreeNode>{
+        let node = Box::new(TreeNode {
+            txs: txs.into_iter().cloned().collect::<Vec<Txn>>(),
+            height,
+            parent: parent.clone(),
+            justify: justify.clone(),
+        });
+
+        let hash = Box::new(TreeNode::hash(&node));
+
+        node
+    }
+
     pub fn node_and_hash<'a>(
         txs: impl IntoIterator<Item = &'a Txn>,
         height: u64,

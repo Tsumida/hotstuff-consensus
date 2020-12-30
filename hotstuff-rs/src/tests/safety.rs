@@ -1,7 +1,6 @@
 use serde::de::Expected;
 
 use super::mocker::{ExpectedState, MockHotStuff};
-use crate::safety::basic::Txn;
 #[test]
 fn test_competitive_branchs() {
     //
@@ -23,20 +22,23 @@ fn test_competitive_branchs() {
 
     mhs.specify_leader(leader)
         .specify_testee(testee)
-        .load_continue_chain(vec![
-            Txn::new("a1".as_bytes()),
-            Txn::new("a2".as_bytes()),
-            Txn::new("a3".as_bytes()),
-        ]);
-
+        .init();
+    
+    mhs.load_continue_chain(vec![
+        format!("a1"), 
+        format!("a2"),
+        format!("a3"),
+    ]);
+    
     let expected_1 = ExpectedState::LockedInHeight(1);
     mhs.check_with_expected_state(&expected_1);
 
-    mhs.extend_from(Txn::new("a1".as_bytes()), Txn::new("b1".as_bytes()));
-    mhs.extend_from(Txn::new("b1".as_bytes()), Txn::new("b2".as_bytes()));
+    mhs.extend_from(format!("a1"), format!("b1"));
+    mhs.extend_from(format!("b1"), format!("b2"));
+
     mhs.check_with_expected_state(&expected_1);
 
-    mhs.extend_from(Txn::new("b2".as_bytes()), Txn::new("b3".as_bytes()));
+    mhs.extend_from(format!("a3"), format!("a4"));
 
     let expected_2 = ExpectedState::CommittedBeforeHeight(1);
     let expected_3 = ExpectedState::LockedInHeight(2);
@@ -44,8 +46,36 @@ fn test_competitive_branchs() {
     mhs.check_with_expected_state(&expected_2);
     mhs.check_with_expected_state(&expected_3);
 
-    mhs.extend_from(Txn::new("a3".as_bytes()), Txn::new("a4".as_bytes()));
+    mhs.extend_from(format!("b2"), format!("b3"));
 
     mhs.check_with_expected_state(&expected_2);
     mhs.check_with_expected_state(&expected_3);
+}
+
+#[test]
+fn test_consecutive_commit(){
+    // init_node <- a1 <- a2 <- a3 <- a4 <- a5 <- a6 <- a7
+    //                             committed   locked
+    let n = 4;
+    let f = 1;
+    let leader = 0;
+    let testee = 1;
+    let mut mhs = MockHotStuff::new(n);
+
+    mhs.specify_leader(leader)
+        .specify_testee(testee)
+        .init();
+
+    mhs.load_continue_chain(vec![
+        format!("a1"), 
+        format!("a2"), 
+        format!("a3"), 
+        format!("a4"), 
+        format!("a5"), 
+        format!("a6"), 
+        format!("a7"), 
+    ]);
+
+    mhs.check_with_expected_state(&ExpectedState::LockedInHeight(5));
+    mhs.check_with_expected_state(&ExpectedState::CommittedBeforeHeight(4));
 }

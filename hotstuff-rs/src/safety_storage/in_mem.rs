@@ -25,6 +25,24 @@ pub struct InMemoryStorage {
     b_locked: Arc<TreeNode>,
 }
 
+impl InMemoryStorage{
+    pub fn new(node_pool: HashMap<NodeHash, Arc<TreeNode>>, qc_map: HashMap<QCHash, Arc<GenericQC>>, view: ViewNumber, init_node: &TreeNode, init_qc: &GenericQC) -> Self{
+        Self{
+            node_pool,
+            qc_map,
+            view,
+            vheight: view,
+            commit_height: 0,
+            b_executed: Arc::new(init_node.clone()),
+            b_locked: Arc::new(init_node.clone()),
+            // safety related
+            leaf: Arc::new(init_node.clone()),
+            // height\view of the leaf.
+            qc_high: Arc::new(init_qc.clone()),
+        }
+    }
+}
+
 impl SafetyStorage for InMemoryStorage {
     fn append_new_node(&mut self, node: &TreeNode) {
         let h = TreeNode::hash(node);
@@ -159,18 +177,17 @@ impl SafetyStorage for InMemoryStorage {
         self.view = ViewNumber::max(self.view, new_view);
     }
 
-    fn is_continues_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool {
+    fn is_consecutive_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool {
         if chain.len() != 3 {
             return false;
         }
 
-        assert!(chain.len() == 3);
         let b_3 = chain.get(0).unwrap().as_ref();
         let b_2 = chain.get(1).unwrap().as_ref();
         let b = chain.get(2).unwrap().as_ref();
 
-        b.height + 1 == b_2.height && b_2.height + 1 == b_3.height
-        // &b_3.parent == &TreeNode::hash(b_3) && &b_2.parent == &TreeNode::hash(b)
+        // b.height + 1 == b_2.height && b_2.height + 1 == b_3.height
+        &b_3.parent == &TreeNode::hash(b_3) && &b_2.parent == &TreeNode::hash(b)
     }
 
     fn get_leaf_height(&self) -> ViewNumber {
@@ -183,15 +200,23 @@ impl SafetyStorage for InMemoryStorage {
             // TODO:execute,
             self.commit_height = h;
         }
-        // self.b_executed = Arc::new(node.clone());
+        self.b_executed = Arc::new(node.clone());
     }
 
-    fn storage_state(&self) -> StorageState {
-        StorageState {
-            view: self.view,
-            executed_height: self.b_executed.height,
-            commit_height: self.commit_height,
-            leaf_height: self.vheight,
-        }
+    fn hotstuff_status(&self) -> Box<Snapshot> {
+        Box::new(
+            Snapshot{
+                view: self.view,
+                // Note: leader info is in upper module. 
+                leader: None,  
+                locked_node_height: self.b_locked.as_ref().height, 
+                last_committed_height: self.commit_height, 
+                // base64 code for leaf
+                // base64 code for qcHigh
+                leaf: base64::encode(&self.b_executed.as_ref().to_be_bytes()),
+                qc_high: base64::encode(&self.qc_high.as_ref().to_be_bytes()),
+            }
+        )
     }
 }
+

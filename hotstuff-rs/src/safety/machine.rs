@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use super::voter::Voter;
 use super::{basic::*, voter};
-use crate::msg::Context;
+use crate::{msg::Context, safety_storage::in_mem::InMemoryStorage};
 use crate::msg::*;
 use crate::traits::*;
 
@@ -62,10 +62,11 @@ pub enum Ready {
 pub trait Safety {
     fn is_leader(&self) -> bool;
 
-    // Return or ignore if self is not the leader.
+    // As leader, recv vote from a certain replica. Return `Ready::Nil` if the vote is valid. 
     fn on_recv_vote(&mut self, ctx: &Context, node: &TreeNode, sign: &SignKit) -> Result<Ready>;
 
-    // Return immediately if self is not the leader.
+    /// React to new proposal. 
+    /// Return `Ready::Nil` for rejecting, otherwise return `Ready::Signature` for accepting. 
     fn on_recv_proposal(
         &mut self,
         ctx: &Context,
@@ -84,7 +85,9 @@ pub trait Safety {
 
     fn safe_node(&mut self, node: &TreeNode, prev_node: &TreeNode) -> bool;
 
-    // fn propose(&mut self, node: &TreeNode, qc_high: Arc<GenericQC>);
+    fn take_snapshot(&self) -> Box<Snapshot>;
+
+    fn process_safety_event(&mut self, req: SafetyEvent) -> Result<Ready>;
 }
 
 #[derive(Debug, Error)]
@@ -105,12 +108,14 @@ pub struct Machine<S: SafetyStorage> {
     voter: Voter,
 
     // config related
-    peer_conf: HashMap<ReplicaID, String>,
+    total: usize, 
     self_id: ReplicaID,
     leader_id: Option<ReplicaID>,
     //input: Receiver<SafetyEvent>,
     //output: Sender<SafetyEvent>,
 }
+
+
 
 impl<S: SafetyStorage> Safety for Machine<S> {
     /// As replica, recv proposal from leader.
@@ -129,12 +134,14 @@ impl<S: SafetyStorage> Safety for Machine<S> {
 
         if let Some(b_2) = chain.get(1) {
             if b_2.height > b_lock.height {
-                self.storage.update_locked_node(node);
+                self.storage.update_locked_node(b_2.as_ref());
             }
         }
 
-        if chain.len() == 3 && self.storage.is_continues_three_chain(&chain) {
+        if self.storage.is_consecutive_three_chain(&chain) {
             ready = self.on_commit(chain.last().unwrap())?;
+        }else{
+            debug!("not consecutive 3-chain, len={}", chain.len())
         }
 
         Ok(ready)
@@ -145,8 +152,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         if b_exec.height < node.height {
             self.storage.commit(node);
         }
-        let s = self.storage.storage_state();
-        Ok(Ready::CommitState(self.get_context(), s.commit_height))
+        Ok(Ready::Nil)
     }
 
     // TODO: unit test
@@ -205,7 +211,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         }
     }
 
-    // Return immediately if self is not the leader.
+    
     fn on_recv_proposal(
         &mut self,
         ctx: &Context,
@@ -233,7 +239,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         } else {
             Ready::Nil
         };
-        self.update_nodes(prop);
+        let _ = self.update_nodes(prop);
         Ok(ready)
     }
 
@@ -254,46 +260,15 @@ impl<S: SafetyStorage> Safety for Machine<S> {
 
         Ok(ready)
     }
-}
 
-impl<S: SafetyStorage> Machine<S> {
-    /// Threshold of the size of quorum set.
-    /// Suppose hotstuff has n nodes:
-    /// - n = 3k,   threshold = 2k,   so there are atmost k-1 faulty nodes.
-    /// - n = 3k+1, threshold = 2k,   so there are atmost k faulty nodes.
-    /// - n = 3k+2, threshold = 2k+1, so there are atmost k faulty nodes
-    #[inline(always)]
-    fn threshold(&self) -> usize {
-        (self.peer_conf.len() << 1) / 3
-    }
-
-    fn get_context(&self) -> Context {
-        Context {
-            from: self.self_id.clone(),
-            view: self.storage.get_view(),
-        }
-    }
-
-    fn make_leaf(&self, cmds: &Vec<Txn>) -> Box<TreeNode> {
-        let prev_leaf = self.storage.get_leaf();
-        let parent = TreeNode::hash(prev_leaf.as_ref());
-        let justify = GenericQC::hash(self.storage.get_qc_high().as_ref());
-        let (node, _) = TreeNode::node_and_hash(cmds, self.storage.get_view(), &parent, &justify);
-        node
-    }
-
+    // TODO: let storage do  job. 
     fn take_snapshot(&self) -> Box<Snapshot> {
-        let ss = Box::new(Snapshot {
-            view: self.storage.get_view(),
-            leader: self.leader_id.clone(),
-            threshold: self.threshold(),
-            leaf: base64::encode(&self.storage.get_last_executed().as_ref().to_be_bytes()),
-            qc_high: base64::encode(&self.storage.get_qc_high().as_ref().to_be_bytes()),
-        });
+        let mut ss = self.storage.hotstuff_status(); 
+        ss.as_mut().leader = self.leader_id.clone(); 
         ss
     }
 
-    pub fn process_safety_event(&mut self, req: SafetyEvent) -> Result<Ready> {
+    fn process_safety_event(&mut self, req: SafetyEvent) -> Result<Ready> {
         match req {
             SafetyEvent::RequestSnapshot => {
                 let ss = self.take_snapshot();
@@ -335,5 +310,47 @@ impl<S: SafetyStorage> Machine<S> {
                 Ok(Ready::Nil)
             }
         }
+        
     }
+}
+
+impl<S: SafetyStorage> Machine<S> {
+    /// Threshold of the size of quorum set.
+    /// Suppose hotstuff has n nodes:
+    /// - n = 3k,   threshold = 2k,   so there are atmost k-1 faulty nodes.
+    /// - n = 3k+1, threshold = 2k,   so there are atmost k faulty nodes.
+    /// - n = 3k+2, threshold = 2k+1, so there are atmost k faulty nodes
+    #[inline(always)]
+    fn threshold(&self) -> usize {
+        (self.total << 1) / 3
+    }
+
+    fn get_context(&self) -> Context {
+        Context {
+            from: self.self_id.clone(),
+            view: self.storage.get_view(),
+        }
+    }
+
+    fn make_leaf(&self, cmds: &Vec<Txn>) -> Box<TreeNode> {
+        let prev_leaf = self.storage.get_leaf();
+        let parent = TreeNode::hash(prev_leaf.as_ref());
+        let justify = GenericQC::hash(self.storage.get_qc_high().as_ref());
+        let (node, _) = TreeNode::node_and_hash(cmds, self.storage.get_view(), &parent, &justify);
+        node
+    }
+
+    
+
+    pub fn new(voter: Voter, self_id: String, total: usize, leader_id: Option<String>, storage: S) -> Self{
+        Self{
+            voter,
+            self_id, 
+            total, 
+            leader_id, 
+            storage, 
+        }
+    }
+
+    
 }

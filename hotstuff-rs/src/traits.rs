@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::msg::StorageState;
+use crate::msg::{Snapshot};
 use crate::safety::basic::*;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,7 +62,7 @@ pub trait SafetyStorage {
     // b'', b', b
     fn find_three_chain(&self, node: &TreeNode) -> Vec<Arc<TreeNode>>;
 
-    fn is_continues_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool;
+    fn is_consecutive_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool;
 
     fn is_conflicting(&self, a: &TreeNode, b: &TreeNode) -> bool;
 
@@ -76,6 +76,7 @@ pub trait SafetyStorage {
 
     fn get_locked_node(&self) -> Arc<TreeNode>;
 
+    /// Update locked node
     fn update_locked_node(&mut self, node: &TreeNode);
 
     fn get_last_executed(&self) -> Arc<TreeNode>;
@@ -91,5 +92,5 @@ pub trait SafetyStorage {
     // Get height of the leaf.
     fn get_leaf_height(&self) -> ViewNumber;
 
-    fn storage_state(&self) -> StorageState;
+    fn hotstuff_status(&self) -> Box<Snapshot>; 
 }
