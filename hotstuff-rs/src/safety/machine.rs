@@ -122,7 +122,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     /// Note that
     fn update_nodes(&mut self, node: &TreeNode) -> Result<Ready> {
         let chain = self.storage.find_three_chain(node);
-        let b_lock = self.storage.get_locked_node();
+        let locked = self.storage.get_locked_node();
         let mut ready = Ready::Nil;
 
         // debug!("find chain with {} nodes", chain.len());
@@ -133,37 +133,34 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         }
 
         if let Some(b_2) = chain.get(1) {
-            if b_2.height > b_lock.height {
+            if b_2.height > locked.height {
                 self.storage.update_locked_node(b_2.as_ref());
             }
         }
 
         if self.storage.is_consecutive_three_chain(&chain) {
             ready = self.on_commit(chain.last().unwrap())?;
-        }else{
-            debug!("not consecutive 3-chain, len={}", chain.len())
         }
 
         Ok(ready)
     }
 
-    fn on_commit(&mut self, node: &TreeNode) -> Result<Ready> {
-        let b_exec = self.storage.get_locked_node();
-        if b_exec.height < node.height {
-            self.storage.commit(node);
-        }
+    fn on_commit(&mut self, to_commit: &TreeNode) -> Result<Ready> {
+        self.storage.commit(to_commit);
         Ok(Ready::Nil)
     }
 
     // TODO: unit test
-    fn safe_node(&mut self, node: &TreeNode, prev_node: &TreeNode) -> bool {
-        let a = !self
+    fn safe_node(&mut self, node: &TreeNode, justify_node: &TreeNode) -> bool {
+        let locked = self.storage.get_locked_node(); 
+        let conflicting = self
             .storage
-            .is_conflicting(node, self.storage.get_locked_node().as_ref());
-        // TODO: in paper b_new.jusitfy.node.height
-        let b = prev_node.height > self.storage.get_locked_node().height;
-        debug!("{} safe_node() result {} - {}", &self.self_id, a, b);
-        a || b
+            .is_conflicting(node, &locked);
+
+        let b = justify_node.height > locked.height;
+        
+        debug!("safe_node() for node with h = {}: {} - {}", &node.height, !conflicting, b);
+        !conflicting || b
     }
 
     fn is_leader(&self) -> bool {
@@ -219,11 +216,13 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         justify: &GenericQC,
     ) -> Result<Ready> {
         self.storage.append_new_qc(justify);
+        info!("recv proposal with h = {}", prop.height); 
         let ready = if let Some(prev_node) = self.storage.find_node_by_qc(&prop.justify) {
-            if prop.height > self.storage.get_leaf_height()
+            if prop.height > self.storage.get_vheight()
                 && self.safe_node(prop, prev_node.as_ref())
             {
                 self.storage.append_new_node(&prop);
+                // sign
                 let kit = SignKit::from((*self.voter.sign(prop), self.voter.sign_id()));
                 Ready::Signature(
                     Context {
@@ -316,10 +315,11 @@ impl<S: SafetyStorage> Safety for Machine<S> {
 
 impl<S: SafetyStorage> Machine<S> {
     /// Threshold of the size of quorum set.
-    /// Suppose hotstuff has n nodes:
-    /// - n = 3k,   threshold = 2k,   so there are atmost k-1 faulty nodes.
-    /// - n = 3k+1, threshold = 2k,   so there are atmost k faulty nodes.
-    /// - n = 3k+2, threshold = 2k+1, so there are atmost k faulty nodes
+    /// Suppose the hotstuff consists of n replicas:
+    /// - n = 3k,   threshold = 2k    -> atmost k-1 faulty nodes.
+    /// - n = 3k+1, threshold = 2k    -> atmost k faulty nodes.
+    /// - n = 3k+2, threshold = 2k+1  -> atmost k faulty nodes
+    /// # Example
     #[inline(always)]
     fn threshold(&self) -> usize {
         (self.total << 1) / 3
@@ -339,8 +339,6 @@ impl<S: SafetyStorage> Machine<S> {
         let (node, _) = TreeNode::node_and_hash(cmds, self.storage.get_view(), &parent, &justify);
         node
     }
-
-    
 
     pub fn new(voter: Voter, self_id: String, total: usize, leader_id: Option<String>, storage: S) -> Self{
         Self{

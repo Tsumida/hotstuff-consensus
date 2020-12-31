@@ -167,12 +167,7 @@ impl MockHotStuff {
         }; 
     }
 
-    /// extend branch from current leaf.
-    pub fn propose(&mut self, tx: String) {
-        unimplemented!()
-    }
-
-    /// extend branch from specified parent`.
+    /// let testee extends branch from specified parent`.
     pub fn extend_from(&mut self, parent: String, tx: String) {
         // parent <- qc <- new_node
         let parent_hash = self.tx_to_hash.get(&parent).unwrap().clone();

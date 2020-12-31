@@ -89,8 +89,8 @@ pub trait SafetyStorage {
 
     fn commit(&mut self, node: &TreeNode);
 
-    // Get height of the leaf.
-    fn get_leaf_height(&self) -> ViewNumber;
+    // Get height of last voted node. 
+    fn get_vheight(&self) -> ViewNumber;
 
     fn hotstuff_status(&self) -> Box<Snapshot>; 
 }

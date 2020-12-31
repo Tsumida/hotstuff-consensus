@@ -5,6 +5,6 @@ mod safety_storage;
 mod traits;
 mod utils;
 
-// #[cfg(test)]
+#[cfg(test)]
 mod tests;
 

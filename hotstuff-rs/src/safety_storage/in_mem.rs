@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use log::debug;
+use log::{debug, info};
 
 use crate::msg::*;
 use crate::safety::basic::*;
@@ -47,7 +47,7 @@ impl SafetyStorage for InMemoryStorage {
     fn append_new_node(&mut self, node: &TreeNode) {
         let h = TreeNode::hash(node);
         self.node_pool.insert(h, Arc::new(node.clone()));
-        self.vheight = node.height;
+        self.vheight = u64::max(self.vheight, node.height);
     }
 
     fn append_new_qc(&mut self, qc: &GenericQC) {
@@ -140,7 +140,7 @@ impl SafetyStorage for InMemoryStorage {
             }
         }
 
-        !(TreeNode::hash(&node) == TreeNode::hash(b))
+        TreeNode::hash(&node) != TreeNode::hash(b)
     }
 
     fn get_node(&self, node_hash: &NodeHash) -> Option<Arc<TreeNode>> {
@@ -158,6 +158,7 @@ impl SafetyStorage for InMemoryStorage {
     }
 
     fn update_locked_node(&mut self, node: &TreeNode) {
+        debug!("locked at node with height {}", node.height);
         self.b_locked = Arc::new(node.clone());
     }
 
@@ -179,6 +180,7 @@ impl SafetyStorage for InMemoryStorage {
 
     fn is_consecutive_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool {
         if chain.len() != 3 {
+            debug!("not consecutive 3-chain, len={}", chain.len());
             return false;
         }
 
@@ -186,21 +188,30 @@ impl SafetyStorage for InMemoryStorage {
         let b_2 = chain.get(1).unwrap().as_ref();
         let b = chain.get(2).unwrap().as_ref();
 
-        // b.height + 1 == b_2.height && b_2.height + 1 == b_3.height
-        &b_3.parent == &TreeNode::hash(b_3) && &b_2.parent == &TreeNode::hash(b)
+        let pred_32 = &b_3.parent == &TreeNode::hash(b_2); 
+        let pred_21 = &b_2.parent == &TreeNode::hash(b); 
+        // &b_3.parent == &TreeNode::hash(b_2) && &b_2.parent == &TreeNode::hash(b)
+        debug!("consecutive judge with h = {},{},{}: {} - {}", b_3.height, b_2.height, b.height, pred_32, pred_21);
+        pred_32 && pred_21
     }
 
-    fn get_leaf_height(&self) -> ViewNumber {
+    fn get_vheight(&self) -> ViewNumber {
         self.vheight
     }
 
-    fn commit(&mut self, node: &TreeNode) {
-        let node_height = node.height;
-        for h in self.commit_height + 1..=node_height {
+    // TODO: add informer for watchers. 
+    fn commit(&mut self, to_commit: &TreeNode) {
+        if self.commit_height >= to_commit.height{
+            debug!("to_commit with smaller height {}", to_commit.height);
+            return; 
+        }
+        let to_commit_height = to_commit.height;
+        for h in self.commit_height + 1..=to_commit_height {
             // TODO:execute,
             self.commit_height = h;
         }
-        self.b_executed = Arc::new(node.clone());
+        self.b_executed = Arc::new(to_commit.clone());
+        info!("commit new proposal, commit_height = {}", self.commit_height);
     }
 
     fn hotstuff_status(&self) -> Box<Snapshot> {
