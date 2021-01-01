@@ -1,21 +1,34 @@
 //! Mocker for testing.
-use std::{hash::Hash, unimplemented};
-
+use std::{hash::Hash, mem::MaybeUninit, unimplemented};
 use std::collections::{HashMap};
 use std::sync::Arc; 
 
-use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare};
+use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare, Signature};
+use simplelog::{CombinedLogger, WriteLogger,  LevelFilter, Config};
 
-use crate::{
-    msg::Context, 
-    safety::{
-        basic::*, 
-        machine::{Machine, Safety, Ready}, 
-        voter::Voter
-    }, 
-    safety_storage::in_mem::InMemoryStorage, 
-    utils::threshold_sign_kit
-};
+use crate::{msg::Context, safety::{basic::*, machine::{Machine, Ready, Safety, SafetyErr}, voter::Voter}, safety_storage::in_mem::InMemoryStorage};
+
+pub(crate) fn init_logger(){
+    let _ = CombinedLogger::init(
+        vec![
+            //TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Mixed),
+            WriteLogger::new(LevelFilter::Debug, Config::default(), std::fs::File::create("./my_rust_bin.log").unwrap())
+        ]
+    );
+}
+
+pub(crate) fn threshold_sign_kit(
+    n: usize,
+    t: usize,
+) -> (SecretKeySet, PublicKeySet, Vec<(usize, SecretKeyShare)>) {
+    assert!(t <= n);
+
+    let s = SecretKeySet::random(t, &mut rand::thread_rng());
+
+    let vec_sk = (0..n).map(|i| (i, s.secret_key_share(i))).collect();
+    let pks = s.public_keys();
+    (s, pks, vec_sk)
+}
 
 pub enum ExpectedState {
     LockedInHeight(usize),
@@ -42,8 +55,6 @@ pub struct MockHotStuff {
     n: usize,
     leader_id: usize,
     testee_id: usize,
-
-
     init_done: bool, 
 }
 
@@ -140,11 +151,10 @@ impl MockHotStuff {
             let (node, hash) = 
             TreeNode::node_and_hash(vec![&Txn::new(cmd.as_bytes())], view, &self.parent, &GenericQC::hash(self.qc_high.as_ref()));
 
-            // send node & qc to the testee
-            self.send_proposal_to_testee(node.as_ref(), prev_qc.as_ref());
+            assert!(self.send_correct_proposal(node.as_ref(), prev_qc.as_ref()).is_ok());
 
             // make qc with signs from replicas, 
-            prev_qc = self.form_qc(view, hash.as_ref());
+            prev_qc = self.form_qc(view, &node, &hash);
     
             // update state
             self.update(cmd, view, prev_qc.clone(), node, hash);
@@ -167,30 +177,18 @@ impl MockHotStuff {
         }; 
     }
 
-    /// let testee extends branch from specified parent`.
+    /// let testee extends branch from specified parent`. This method will increate height. 
+    /// Panic if parent didn't exist. 
     pub fn extend_from(&mut self, parent: String, tx: String) {
-        // parent <- qc <- new_node
         let parent_hash = self.tx_to_hash.get(&parent).unwrap().clone();
-
+        let parent = self.nodes.get(&parent_hash).unwrap().clone();
         // form qc of parent and use it to create new proposal. 
-        let qc = self.form_qc(self.height, &parent_hash);
-        let qc_hash = Arc::new(GenericQC::hash(qc.as_ref())); 
-        let (node, hash) = TreeNode::node_and_hash(vec![&Txn::new(tx.as_bytes())], self.height + 1, &parent_hash, &qc_hash);
+        let qc = self.form_qc(self.height, &parent, &parent_hash);
 
-        self.send_proposal_to_testee(&node, &qc);
-
-        self.update(tx, self.height + 1, qc, node, hash)
-    }
-
-    fn send_proposal_to_testee(&mut self, node: &TreeNode, justify: &GenericQC){
-        // send node & qc to the testee
-        let ready = self.testee.as_mut().unwrap().on_recv_proposal(&Context{
-            from: format!("mocker"), 
-            view: self.height as u64,  
-        }, node, justify).unwrap();
-
+        let res = self.propose(&parent_hash, tx, qc);
+        
         assert!(
-            if let Ready::Signature(_, _, _) = ready{
+            if let Ok(Ready::Signature(_, _, _)) = res{
                 true
             }else{
                 false
@@ -198,15 +196,64 @@ impl MockHotStuff {
         );
     }
 
-    fn form_qc(&mut self, view: ViewNumber, node_hash: &NodeHash) -> Arc<GenericQC>{
+    /// Send new proposal with corrupted qc to testee. This method will increate height. 
+    pub fn propose_with_corrupted_qc(&mut self, parent: String, tx: String) {
+        let parent_hash = self.tx_to_hash.get(&parent).unwrap().clone();
+
+        // form qc of parent and use it to create new proposal. 
+        let qc = self.form_corrupted_qc(self.height, &parent_hash);
+
+        let res = self.propose(&parent_hash, tx, qc);
+
+        assert!(
+            if let Err(SafetyErr::CorruptedQC) = res{
+                true
+            }else{
+                false
+            }
+        );
+    }
+
+    fn propose(&mut self, parent_hash:&NodeHash, tx: String, qc: Arc<GenericQC>) -> Result<Ready, SafetyErr>{
+        // parent <- qc <- new_node
+
+        // form qc of parent and use it to create new proposal. 
+        // let qc = self.form_qc(self.height, &parent_hash);
+        let qc_hash = Arc::new(GenericQC::hash(qc.as_ref())); 
+        let (node, hash) = TreeNode::node_and_hash(vec![&Txn::new(tx.as_bytes())], self.height + 1, parent_hash, &qc_hash);
+        let res = self.send_correct_proposal(&node, &qc); 
+        self.update(tx, self.height + 1, qc, node, hash);
+        res
+    }
+
+    fn send_correct_proposal(&mut self, node: &TreeNode, justify: &GenericQC) -> Result<Ready, SafetyErr>{
+        // send node & qc to the testee
+        self.testee.as_mut().unwrap().on_recv_proposal(&Context{
+            from: format!("mocker"), 
+            view: self.height as u64,  
+        }, node, justify)
+    }
+
+    /// Create quorum certificate for a node. 
+    fn form_qc(&mut self, view: ViewNumber, node: &TreeNode, node_hash: &NodeHash) -> Arc<GenericQC>{
         // make qc with signs from replicas, 
+        let node_bytes = node.to_be_bytes();
         let signs = self.sks
             .iter()
-            .map(|(i, sk)| (*i, sk.sign(node_hash)))
+            .map(|(i, sk)| (*i, sk.sign(&node_bytes)))
             .collect::<Vec<(usize, SignatureShare)>>();
-            let combined_sign = self.pks.as_ref().unwrap()
-            .combine_signatures(signs.iter().map(|(i, s)| (*i, s)))
-            .unwrap();
+        let combined_sign = self.pks.as_ref().unwrap()
+        .combine_signatures(signs.iter().map(|(i, s)| (*i, s)))
+        .unwrap();
+
+        Arc::new(GenericQC::new(view, node_hash, &combined_sign))
+    }
+
+    fn form_corrupted_qc(&mut self, view: ViewNumber, node_hash: &NodeHash) -> Arc<GenericQC>{
+        
+        let combined_sign: Signature = unsafe{
+            MaybeUninit::uninit().assume_init()
+        };
 
         Arc::new(GenericQC::new(view, node_hash, &combined_sign))
     }
@@ -219,5 +266,6 @@ impl MockHotStuff {
         self.nodes.insert(TreeNode::hash(node.as_ref()), Arc::new(*node));
         self.qcs.insert(GenericQC::hash(prev_qc.as_ref()), self.qc_high.clone());
     }
+
 }
 

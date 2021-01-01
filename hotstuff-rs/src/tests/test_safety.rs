@@ -1,17 +1,7 @@
-use serde::de::Expected;
-use simplelog::CombinedLogger;
 
-use super::mocker::{ExpectedState, MockHotStuff};
-use simplelog::*; 
+use super::mocker::{ExpectedState, MockHotStuff, init_logger};
 
-fn init_logger(){
-    let _ = CombinedLogger::init(
-        vec![
-            //TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Mixed),
-            //WriteLogger::new(LevelFilter::Debug, Config::default(), std::fs::File::create("./my_rust_bin.log").unwrap())
-        ]
-    );
-}
+
 
 #[test]
 fn test_competitive_branchs() {
@@ -57,7 +47,10 @@ fn test_competitive_branchs() {
 
     mhs.check_with_expected_state(&expected_2);
     mhs.check_with_expected_state(&expected_3);
-    // if we propose b3 based on b2, there is no way to form quorum certificate. 
+
+    // if we propose b3 based on b2, there is no way to form a quorum certificate of b2. 
+    // but if we mistakenly create b3 with qc of b2 and propose it, 
+    // the testee may switch to branch b2 even if it's locked at a2 (undefined behavior). 
 }
 
 #[test]
@@ -88,10 +81,16 @@ fn test_consecutive_commit(){
 
 
 #[test]
-#[ignore= "unimplemented"]
 fn test_corrupted_qc(){
-    // init <- a1 <- a2 (withcorrupted qc for a1)
+    //             |   corrupted   |
+    // init <- a1 <- a2 <- a3 <- a4
+    //            <- b1 <- b2 <- b3
+    //             |   correct     |
     // Machine should validate qc independently. 
+    // all of a2, a3, a4 should be rejected due to corrupted qc. 
+    // And then propose correct branch b1 <- b2 <- b3
+    // note that b1.height = 5
+
     let n = 4;
     let leader = 0;
     let testee = 1;
@@ -107,4 +106,45 @@ fn test_corrupted_qc(){
         format!("a1"), 
     ]);
 
+    mhs.propose_with_corrupted_qc(format!("a1"), format!("a2"));
+    mhs.propose_with_corrupted_qc(format!("a2"), format!("a3"));
+    mhs.propose_with_corrupted_qc(format!("a3"), format!("a4"));
+
+    mhs.check_with_expected_state(&ExpectedState::CommittedBeforeHeight(0)); 
+    mhs.check_with_expected_state(&ExpectedState::LockedInHeight(0));
+
+    mhs.extend_from(format!("a1"), format!("b1"));
+    mhs.extend_from(format!("b1"), format!("b2"));
+    mhs.extend_from(format!("b2"), format!("b3"));
+
+    mhs.check_with_expected_state(&ExpectedState::CommittedBeforeHeight(1)); 
+    mhs.check_with_expected_state(&ExpectedState::LockedInHeight(5));
+
+}
+
+
+#[test]
+#[ignore = "unimplemented"]
+fn test_corrupted_vote(){
+    // init <- a1 <- a2 
+    //              
+    // Machine should validate vote independently. 
+
+    let n = 4;
+    let leader = 0;
+    let testee = 0;
+    let mut mhs = MockHotStuff::new(n);
+
+    init_logger();
+
+    mhs.specify_leader(leader)
+        .specify_testee(testee)
+        .init();
+
+    mhs.load_continue_chain(vec![
+        format!("a1"), 
+        format!("a2"), 
+    ]);
+
+    // TODO: 
 }

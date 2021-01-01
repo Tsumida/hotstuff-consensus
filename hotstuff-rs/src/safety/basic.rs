@@ -114,6 +114,12 @@ impl GenericQC {
         }
     }
 
+    // TODO: consider corrupted qc with None as combined_sign. 
+    #[inline(always)]
+    pub fn is_init_qc(qc: &GenericQC) -> bool{
+        qc.combined_sign.is_none()
+    }
+
     // TODO: refactor
     pub fn hash(&self) -> QCHash {
         let mut res = [0u8; 32];

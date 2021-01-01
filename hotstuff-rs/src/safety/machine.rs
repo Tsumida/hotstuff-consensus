@@ -1,11 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use log::{debug, error, info};
 use thiserror::Error;
 
 use super::voter::Voter;
 use super::{basic::*, voter};
-use crate::{msg::Context, safety_storage::in_mem::InMemoryStorage};
+use crate::{msg::Context};
 use crate::msg::*;
 use crate::traits::*;
 
@@ -59,13 +59,13 @@ pub enum Ready {
     CommitState(Context, ViewNumber),
 }
 
+/// Safety defines replica's reaction to message from other hotstuff peers. 
+/// Any Message received must be validated before further processing. 
 pub trait Safety {
-    fn is_leader(&self) -> bool;
-
     // As leader, recv vote from a certain replica. Return `Ready::Nil` if the vote is valid. 
     fn on_recv_vote(&mut self, ctx: &Context, node: &TreeNode, sign: &SignKit) -> Result<Ready>;
 
-    /// React to new proposal. 
+    /// Reaction to a new proposal. 
     /// Return `Ready::Nil` for rejecting, otherwise return `Ready::Signature` for accepting. 
     fn on_recv_proposal(
         &mut self,
@@ -74,9 +74,10 @@ pub trait Safety {
         justify: &GenericQC,
     ) -> Result<Ready>;
 
+    /// Form new proposal for queueing transactions. 
     fn on_beat(&mut self, proposal: &TreeNode) -> Result<Ready>;
 
-    // commit nodes and return the latest state about commitment
+    /// commit nodes and return the latest state about commitment. 
     fn on_commit(&mut self, node: &TreeNode) -> Result<Ready>;
 
     fn on_view_change(&mut self, leader: ReplicaID, view: ViewNumber) -> Result<Ready>;
@@ -100,6 +101,15 @@ pub enum SafetyErr {
 
     #[error("error in voting: {0}")]
     VoterError(voter::VoteErr),
+    
+    #[error("corrupted vote")]
+    CorruptedVote, 
+
+    // Note that for case init <- a1 <- a2 <- a3, all of them were proposed by correct leader. 
+    // if we didn't recv a2 before a3 carrying qc of a2, 
+    // we actually can't recongnize whether this qc is corrupted or correct. 
+    #[error("corrupted qc")]
+    CorruptedQC, 
 }
 
 pub struct Machine<S: SafetyStorage> {
@@ -114,8 +124,6 @@ pub struct Machine<S: SafetyStorage> {
     //input: Receiver<SafetyEvent>,
     //output: Sender<SafetyEvent>,
 }
-
-
 
 impl<S: SafetyStorage> Safety for Machine<S> {
     /// As replica, recv proposal from leader.
@@ -150,7 +158,6 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         Ok(Ready::Nil)
     }
 
-    // TODO: unit test
     fn safe_node(&mut self, node: &TreeNode, justify_node: &TreeNode) -> bool {
         let locked = self.storage.get_locked_node(); 
         let conflicting = self
@@ -163,12 +170,6 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         !conflicting || b
     }
 
-    fn is_leader(&self) -> bool {
-        self.leader_id
-            .as_ref()
-            .map_or(false, |leader| leader == &self.self_id)
-    }
-
     // start prposal
     fn on_beat(&mut self, proposal: &TreeNode) -> Result<Ready> {
         info!("{} beats", self.self_id);
@@ -176,8 +177,11 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         Ok(Ready::Nil)
     }
 
-    // TODO: seperate hashing.
+    // TODO: add validating. 
     fn on_recv_vote(&mut self, ctx: &Context, prop: &TreeNode, sign: &SignKit) -> Result<Ready> {
+        if !self.voter.validate_vote(prop, sign){
+            return Err(SafetyErr::CorruptedVote);
+        }
         if let Err(e) = self.voter.add_vote(ctx, sign) {
             error!("{:?}", e);
             return Ok(Ready::Nil);
@@ -192,6 +196,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 Ok(combined_sign) => {
                     let prop_hash = TreeNode::hash(prop);
                     let qc = GenericQC {
+                        // TODO: should be node.height?
                         view: self.storage.get_view(),
                         node: prop_hash,
                         combined_sign: Some(*combined_sign),
@@ -208,35 +213,48 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         }
     }
 
-    
+    // TODO: add validating
     fn on_recv_proposal(
         &mut self,
         ctx: &Context,
         prop: &TreeNode,
         justify: &GenericQC,
     ) -> Result<Ready> {
+        if let Some(qc_node) = self.storage.get_node(&justify.node){
+            // any correct qc has combined signature except for init_qc.
+            if !GenericQC::is_init_qc(&justify){
+                let valid = self.voter.validate_qc(&qc_node, justify.combined_sign.as_ref().unwrap()); 
+                debug!("recv prop validate: {}",valid); 
+                if !valid {
+                    return Err(SafetyErr::CorruptedQC);
+                }
+            }
+        }else{
+            debug!("prop.justify.node not found"); 
+            return Err(SafetyErr::CorruptedQC);
+        }
+
         self.storage.append_new_qc(justify);
         info!("recv proposal with h = {}", prop.height); 
-        let ready = if let Some(prev_node) = self.storage.find_node_by_qc(&prop.justify) {
+                
+        let mut ready = Ready::Nil;
+        if let Some(prev_node) = self.storage.find_node_by_qc(&prop.justify) {
             if prop.height > self.storage.get_vheight()
                 && self.safe_node(prop, prev_node.as_ref())
             {
                 self.storage.append_new_node(&prop);
                 // sign
                 let kit = SignKit::from((*self.voter.sign(prop), self.voter.sign_id()));
-                Ready::Signature(
+                
+                ready = Ready::Signature(
                     Context {
                         view: self.storage.get_view(),
                         from: self.self_id.clone(),
                     },
                     Arc::new(prop.clone()),
                     Box::new(kit),
-                )
-            } else {
-                Ready::Nil
+                );
             }
-        } else {
-            Ready::Nil
         };
         let _ = self.update_nodes(prop);
         Ok(ready)
