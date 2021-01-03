@@ -32,7 +32,7 @@ fn test_competitive_branchs() {
         format!("a3"),
     ]);
     
-    let expected_1 = ExpectedState::LockedInHeight(1);
+    let expected_1 = ExpectedState::LockedAt(format!("a1"));
     mhs.check_with_expected_state(&expected_1);
 
     mhs.extend_from(format!("a1"), format!("b1"));
@@ -43,7 +43,7 @@ fn test_competitive_branchs() {
     mhs.extend_from(format!("a3"), format!("a4"));
 
     let expected_2 = ExpectedState::CommittedBeforeHeight(1);
-    let expected_3 = ExpectedState::LockedInHeight(2);
+    let expected_3 = ExpectedState::LockedAt(format!("a2"));
 
     mhs.check_with_expected_state(&expected_2);
     mhs.check_with_expected_state(&expected_3);
@@ -75,7 +75,7 @@ fn test_consecutive_commit(){
         format!("a4"), 
     ]);
 
-    mhs.check_with_expected_state(&ExpectedState::LockedInHeight(2));
+    mhs.check_with_expected_state(&ExpectedState::LockedAt(format!("a2")));
     mhs.check_with_expected_state(&ExpectedState::CommittedBeforeHeight(1));
 }
 
@@ -88,7 +88,7 @@ fn test_corrupted_qc(){
     // Machine should validate qc independently. 
     // all of a2, a3, a4 should be rejected due to corrupted qc. 
     // And then propose correct branch b1 <- b2 <- b3
-    // note that b1.height = 5
+    // Now b1 is locked. 
 
     let n = 4;
     let leader = 0;
@@ -110,14 +110,14 @@ fn test_corrupted_qc(){
     mhs.propose_with_corrupted_qc(format!("a3"), format!("a4"));
 
     mhs.check_with_expected_state(&ExpectedState::CommittedBeforeHeight(0)); 
-    mhs.check_with_expected_state(&ExpectedState::LockedInHeight(0));
+    mhs.check_with_expected_state(&ExpectedState::LockedAt(format!("init")));
 
     mhs.extend_from(format!("a1"), format!("b1"));
     mhs.extend_from(format!("b1"), format!("b2"));
     mhs.extend_from(format!("b2"), format!("b3"));
 
     mhs.check_with_expected_state(&ExpectedState::CommittedBeforeHeight(1)); 
-    mhs.check_with_expected_state(&ExpectedState::LockedInHeight(5));
+    mhs.check_with_expected_state(&ExpectedState::LockedAt(format!("b1")));
 }
 
 #[test]
@@ -125,8 +125,8 @@ fn test_new_proposal(){
     // init <- a1 <- a2 <- a3 <- a4 <- a5
     //               |                  |
     //              locked             new-proposal without qc
-    // Received new-view msg respectively based on a2, a3, a4, a5, 
-    // leader should make new proposal base on a5. 
+    // Received new-view msg respectively based on a1, a2, a3, a4, 
+    // leader should make new proposal base on a4. 
 
     let n = 4;
     let leader = 0;
@@ -144,34 +144,53 @@ fn test_new_proposal(){
         format!("a2"), 
         format!("a3"), 
         format!("a4"), 
-        format!("a5"), 
+        format!("a5"),  // recv a5
     ]);
 
     // recv new-view msgs a2, a3, a4, a5,
     let output = mhs
-    .recv_new_view_msg(
-        n, 
-        vec![format!("a2"), 
-                format!("a3"), 
-                format!("a4"), 
-                format!("a5")])
+    .recv_new_view_msgs(
+    vec![
+        (0, format!("a2")), // qc of a1
+        (1, format!("a3")), 
+        (2, format!("a4")), // qc of a3
+        ])
     .make_proposal(format!("a6")); 
 
+    // leader's qc_high is qc of a4 => new proposal is based on q4
     if let Ready::NewProposal(_, prop, _) = output{
-        mhs.check_proposal_with(
-            &ExpectedState::PropsalBaseOn(format!("a4"), &prop), 
-        );
+        mhs
+        .check_proposal_with(&ExpectedState::QcOf(format!("a4"), &prop))
+        .check_proposal_with(&ExpectedState::ParentIs(format!("a4"), &prop));
     }else{
-        unreachable!()
+        panic!();
     }
 }
 
 #[test]
 #[ignore = "unimplemented"]
 fn test_corrupted_new_view_msg(){
-    // init <- a1 
+    // init <- a1 <- a2 <- a3 <- a4 <- a5
     // 
     // recv corrupted new view msgs. Machine must validate NewView Msg before further processing. 
+    let n = 4;
+    let leader = 0;
+    let testee = 0;
+    let mut mhs = MockHotStuff::new(n);
+
+    init_logger();
+
+    mhs.specify_leader(leader)
+        .specify_testee(testee)
+        .init();
+
+    mhs.load_continue_chain(vec![
+        format!("a1"), 
+        format!("a2"), 
+        format!("a3"),  
+    ]);
+
+    mhs.recv_corrupted_view_msg(format!("a5"), format!("a6"));
 }
 
 #[test]
@@ -201,7 +220,7 @@ fn test_corrupted_vote(){
 
 #[test]
 #[ignore = "unimplemented"]
-fn test_commit_failed_proposal(){
+fn test_commit_invisible_proposal(){
     // init <- a1 <- a2 (failed) <- a3 <- a4 <- a5 <- a6
     //  
     // Leader failed to form a QC for a2 at view 2. 

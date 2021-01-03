@@ -33,9 +33,10 @@ pub(crate) fn threshold_sign_kit(
 }
 
 pub enum ExpectedState<'a> {
-    LockedInHeight(usize),
+    LockedAt(String),
     CommittedBeforeHeight(usize),
-    PropsalBaseOn(String, &'a TreeNode),
+    ParentIs(String, &'a TreeNode),
+    QcOf(String, &'a TreeNode),
 }
 
 pub struct MockHotStuff {
@@ -115,13 +116,14 @@ impl MockHotStuff {
         self.pks = Some(b);
         self.sks = c;
 
-
         let init_node = Arc::new(TreeNode::genesis());
         let init_qc = Arc::new(GenericQC::genesis(0, &init_node));
         let init_node_hash = TreeNode::hash(&init_node); 
         let init_qc_hash = GenericQC::hash(&init_qc); 
 
         self.tx_to_hash.insert(format!("init"), init_node_hash.clone());
+        self.qcs.insert(init_qc_hash.clone(), init_qc.clone());
+        self.nodes.insert(init_node_hash.clone(), init_node.clone());
 
         let view = 0;
         let mut node_pool  = HashMap::new();
@@ -166,6 +168,7 @@ impl MockHotStuff {
             // update state
             self.update(cmd, view, prev_qc.clone(), node, hash);
         }
+        self.height = view; 
         self
     }
 
@@ -174,11 +177,13 @@ impl MockHotStuff {
     pub fn check_with_expected_state(&self, expected: &ExpectedState){
         let ss = self.testee.as_ref().unwrap().take_snapshot(); 
         match expected{
-            ExpectedState::LockedInHeight(h) => {
-                assert!(ss.locked_node_height == *h as u64, format!("{:?}", ss));
+            ExpectedState::LockedAt(tx) => {
+                let node_hash = self.tx_to_hash.get(tx).unwrap();
+                let node = self.nodes.get(node_hash).unwrap();
+                assert!(ss.locked_node.height == node.height, format!("{:?}", node));
             }, 
             ExpectedState::CommittedBeforeHeight(h) => {
-                assert!(ss.last_committed_height >= *h as u64, format!("{:?}", ss)); 
+                assert!(ss.last_committed >= *h as u64, format!("{:?}", ss)); 
             }
             _ => unimplemented!(),
         }; 
@@ -192,8 +197,8 @@ impl MockHotStuff {
         // form qc of parent and use it to create new proposal. 
         let qc = self.form_qc(self.height, &parent, &parent_hash);
 
+        self.tick();
         let res = self.propose(&parent_hash, tx, qc);
-        
         assert!(
             if let Ok(Ready::Signature(_, _, _)) = res{
                 true
@@ -209,6 +214,8 @@ impl MockHotStuff {
 
         // form qc of parent and use it to create new proposal. 
         let qc = self.form_corrupted_qc(self.height, &parent_hash);
+
+        self.tick();
         let res = self.propose(&parent_hash, tx, qc);
 
         assert!(
@@ -221,11 +228,10 @@ impl MockHotStuff {
     }
 
     /// Leader recv txs from other 
-    pub fn recv_new_view_msg(&mut self, num: usize, txs: Vec<String>) -> &mut Self{
-        assert!(num >= 1 && num <= self.n);
-        for (i, tx) in txs.iter().enumerate(){
+    pub fn recv_new_view_msgs(&mut self, txs: Vec<(usize, String)>) -> &mut Self{
+        for (i, tx) in txs.iter(){
             let node_hash = self.tx_to_hash.get(tx).unwrap(); 
-            debug!("{:?}", &node_hash);
+            debug!("{}, {:?}", tx, &node_hash);
             let node = self.nodes.get(node_hash).unwrap();
             let qc = self.qcs.get(&node.justify).unwrap();
             let _ = self.testee.as_mut().unwrap().process_safety_event(
@@ -234,7 +240,6 @@ impl MockHotStuff {
                         from: format!("{}", i), 
                         view: self.height, 
                     }, 
-                    node.clone(), 
                     qc.clone()
                 ) 
             ).unwrap();
@@ -243,23 +248,52 @@ impl MockHotStuff {
     }
 
     pub fn make_proposal(&mut self, new_tx: String) -> Ready{
-        self.testee
+        self.tick();
+        let res = self.testee
         .as_mut()
         .unwrap()
         .process_safety_event(SafetyEvent::NewTx(vec![Txn::new(new_tx)]))
-        .unwrap()
+        .unwrap();
+        res
     }
 
     pub fn check_proposal_with(&self, expected: &ExpectedState) -> &Self{
         match expected{
-            ExpectedState::PropsalBaseOn(parent, prop) => {
+            ExpectedState::ParentIs(parent, prop) => {
                 let parent = self.tx_to_hash.get(parent).unwrap();
                 assert_eq!(parent, &prop.parent);
             }, 
+            ExpectedState::QcOf(qc_node_tx, prop) => {
+                let qc_node_hash = self.tx_to_hash.get(qc_node_tx).unwrap();
+                let prop_justify_node_hash = &self.qcs.get(&prop.justify).unwrap().node;
+                assert_eq!(qc_node_hash, prop_justify_node_hash);
+            }
             _ => panic!("invalided expected state for this method"), 
         }
-
         self
+    }
+
+    /// Recv one corrupted new-view msg. 
+    pub fn recv_corrupted_view_msg(&mut self, prev_tx: String, tx: String) -> &mut Self{
+        let prev_hash = self.tx_to_hash.get(&prev_tx).unwrap();
+        let qc = self.form_corrupted_qc(self.height, prev_hash); 
+        let qc_hash = GenericQC::hash(&qc); 
+        let node = TreeNode::new(&vec![Txn::new(tx.as_bytes())], self.height, prev_hash, &qc_hash);
+        let _ = self.testee.as_mut().unwrap().on_recv_proposal(
+            &Context{
+                from: format!("{}", self.leader_id), 
+                view: self.height, 
+            }, 
+            &node, 
+            &qc, 
+        );
+        self
+    }
+
+    /// Increase both testee and mocker's ticker. 
+    fn tick(&mut self){
+        self.height += 1; 
+        self.testee.as_mut().unwrap().on_view_change(format!("{}", self.leader_id), self.height).unwrap();
     }
 
     fn propose(&mut self, parent_hash:&NodeHash, tx: String, qc: Arc<GenericQC>) -> Result<Ready, SafetyErr>{
@@ -268,9 +302,10 @@ impl MockHotStuff {
         // form qc of parent and use it to create new proposal. 
         // let qc = self.form_qc(self.height, &parent_hash);
         let qc_hash = Arc::new(GenericQC::hash(qc.as_ref())); 
-        let (node, hash) = TreeNode::node_and_hash(vec![&Txn::new(tx.as_bytes())], self.height + 1, parent_hash, &qc_hash);
+        self.tick();
+        let (node, hash) = TreeNode::node_and_hash(vec![&Txn::new(tx.as_bytes())], self.height, parent_hash, &qc_hash);
         let res = self.send_correct_proposal(&node, &qc); 
-        self.update(tx, self.height + 1, qc, node, hash);
+        self.update(tx, self.height, qc, node, hash);
         res
     }
 
@@ -297,7 +332,7 @@ impl MockHotStuff {
         Arc::new(GenericQC::new(view, node_hash, &combined_sign))
     }
 
-    fn form_corrupted_qc(&mut self, view: ViewNumber, node_hash: &NodeHash) -> Arc<GenericQC>{
+    fn form_corrupted_qc(&self, view: ViewNumber, node_hash: &NodeHash) -> Arc<GenericQC>{
         
         let combined_sign: Signature = unsafe{
             MaybeUninit::uninit().assume_init()

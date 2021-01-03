@@ -22,10 +22,7 @@ pub enum SafetyEvent {
     // As leader, recv sign(ACK) from other replicas.
     RecvSign(Context, Arc<TreeNode>, Arc<SignKit>),
 
-    // TODO:
-    // Pacemaker related. As replica, update qc_high.
-    // Note that the replica may not receive the proposal until receive this msg.
-    RecvNewViewMsg(Context, Arc<TreeNode>, Arc<GenericQC>),
+    RecvNewViewMsg(Context, Arc<GenericQC>),
 
     // TODO:
     // pacemaker -> statesafety, and then send new view msg.
@@ -48,7 +45,7 @@ pub enum Ready {
     // nothing to do
     Nil,
     //
-    InternalState(Context, Box<Snapshot>),
+    InternalState(Context, Snapshot),
     // Form new proposal. 
     NewProposal(Context, Arc<TreeNode>, Arc<GenericQC>),
     //
@@ -86,7 +83,7 @@ pub trait Safety {
 
     fn safe_node(&mut self, node: &TreeNode, prev_node: &TreeNode) -> bool;
 
-    fn take_snapshot(&self) -> Box<Snapshot>;
+    fn take_snapshot(&self) -> Snapshot;
 
     fn process_safety_event(&mut self, req: SafetyEvent) -> Result<Ready>;
 }
@@ -173,9 +170,9 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     // start prposal
     fn on_beat(&mut self, cmds: Vec<Txn>) -> Result<Ready> {
         let proposal = self.make_leaf(&cmds);
-        info!("{} beats", self.self_id);
         self.storage.update_leaf(&proposal);
-        let justify = self.storage.get_qc(&proposal.justify).unwrap(); 
+        // let justify = self.storage.get_qc(&proposal.justify).unwrap(); 
+        let justify = self.storage.get_qc_high();
         Ok(Ready::NewProposal(self.get_context(), Arc::new(*proposal), justify))
     }
 
@@ -281,9 +278,9 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     }
 
     // TODO: let storage do  job. 
-    fn take_snapshot(&self) -> Box<Snapshot> {
+    fn take_snapshot(&self) -> Snapshot {
         let mut ss = self.storage.hotstuff_status(); 
-        ss.as_mut().leader = self.leader_id.clone(); 
+        ss.leader = self.leader_id.clone(); 
         ss
     }
 
@@ -304,7 +301,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 // let cmds = vec![cmd];
                 self.on_beat(cmds)
             }
-            SafetyEvent::RecvNewViewMsg(_, _, qc_high) => {
+            SafetyEvent::RecvNewViewMsg(_, qc_high) => {
                 // note: recv largest qc_high
                 let qc_node = self.storage.get_node(&qc_high.node).unwrap();
                 self.storage
@@ -351,10 +348,17 @@ impl<S: SafetyStorage> Machine<S> {
         }
     }
 
+    // TODO: consider use parent as prop.justify.node 
+    // 
+    // init <- a1 <- a2 (abandon)
+    //          |
+    //          <--- a3     
+    //  
     fn make_leaf(&self, cmds: &Vec<Txn>) -> Box<TreeNode> {
         let prev_leaf = self.storage.get_leaf();
         let parent = TreeNode::hash(prev_leaf.as_ref());
         let justify = GenericQC::hash(self.storage.get_qc_high().as_ref());
+
         let (node, _) = TreeNode::node_and_hash(cmds, self.storage.get_view(), &parent, &justify);
         node
     }

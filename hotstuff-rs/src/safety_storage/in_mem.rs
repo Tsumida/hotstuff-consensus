@@ -97,6 +97,7 @@ impl SafetyStorage for InMemoryStorage {
     }
 
     fn update_leaf(&mut self, new_leaf: &TreeNode) {
+        debug!("update leaf {:?}", new_leaf);
         self.vheight = new_leaf.height;
         self.leaf = Arc::new(new_leaf.clone());
         self.node_pool
@@ -212,20 +213,15 @@ impl SafetyStorage for InMemoryStorage {
         info!("commit new proposal, commit_height = {}", self.commit_height);
     }
 
-    fn hotstuff_status(&self) -> Box<Snapshot> {
-        Box::new(
-            Snapshot{
-                view: self.view,
-                // Note: leader info is in upper module. 
-                leader: None,  
-                locked_node_height: self.b_locked.as_ref().height, 
-                last_committed_height: self.commit_height, 
-                // base64 code for leaf
-                // base64 code for qcHigh
-                leaf: base64::encode(&self.b_executed.as_ref().to_be_bytes()),
-                qc_high: base64::encode(&self.qc_high.as_ref().to_be_bytes()),
-            }
-        )
+    fn hotstuff_status(&self) -> Snapshot {
+        Snapshot{
+            view: self.view,
+            leader: None,  
+            qc_high: Box::new(self.qc_high.as_ref().clone()), 
+            leaf: Box::new(self.leaf.as_ref().clone()), 
+            locked_node: Box::new(self.b_locked.as_ref().clone()), 
+            last_committed: self.commit_height, 
+        }
     }
 }
 

@@ -72,6 +72,7 @@ pub trait SafetyStorage {
 
     fn get_leaf(&self) -> Arc<TreeNode>;
 
+    // Check height before update leaf. 
     fn update_leaf(&mut self, new_leaf: &TreeNode);
 
     fn get_locked_node(&self) -> Arc<TreeNode>;
@@ -92,5 +93,5 @@ pub trait SafetyStorage {
     // Get height of last voted node. 
     fn get_vheight(&self) -> ViewNumber;
 
-    fn hotstuff_status(&self) -> Box<Snapshot>; 
+    fn hotstuff_status(&self) -> Snapshot; 
 }

@@ -7,12 +7,10 @@ use crate::safety::basic::*;
 pub struct Snapshot {
     pub view: ViewNumber,
     pub leader: Option<ReplicaID>,
-    // base64 code for leaf
-    pub leaf: String,
-    // base64 code for qcHigh
-    pub qc_high: String,
-    pub locked_node_height: ViewNumber, 
-    pub last_committed_height: ViewNumber, 
+    pub qc_high: Box<GenericQC>, 
+    pub leaf: Box<TreeNode>, 
+    pub locked_node: Box<TreeNode>, 
+    pub last_committed: ViewNumber, 
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
