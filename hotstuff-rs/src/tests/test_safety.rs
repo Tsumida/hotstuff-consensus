@@ -1,7 +1,7 @@
+use std::unreachable;
 
 use super::mocker::{ExpectedState, MockHotStuff, init_logger};
-
-
+use crate::safety::machine::Ready; 
 
 #[test]
 fn test_competitive_branchs() {
@@ -79,7 +79,6 @@ fn test_consecutive_commit(){
     mhs.check_with_expected_state(&ExpectedState::CommittedBeforeHeight(1));
 }
 
-
 #[test]
 fn test_corrupted_qc(){
     //             |   corrupted   |
@@ -119,9 +118,61 @@ fn test_corrupted_qc(){
 
     mhs.check_with_expected_state(&ExpectedState::CommittedBeforeHeight(1)); 
     mhs.check_with_expected_state(&ExpectedState::LockedInHeight(5));
-
 }
 
+#[test]
+fn test_new_proposal(){
+    // init <- a1 <- a2 <- a3 <- a4 <- a5
+    //               |                  |
+    //              locked             new-proposal without qc
+    // Received new-view msg respectively based on a2, a3, a4, a5, 
+    // leader should make new proposal base on a5. 
+
+    let n = 4;
+    let leader = 0;
+    let testee = 0;
+    let mut mhs = MockHotStuff::new(n);
+
+    init_logger();
+
+    mhs.specify_leader(leader)
+        .specify_testee(testee)
+        .init();
+
+    mhs.load_continue_chain(vec![
+        format!("a1"), 
+        format!("a2"), 
+        format!("a3"), 
+        format!("a4"), 
+        format!("a5"), 
+    ]);
+
+    // recv new-view msgs a2, a3, a4, a5,
+    let output = mhs
+    .recv_new_view_msg(
+        n, 
+        vec![format!("a2"), 
+                format!("a3"), 
+                format!("a4"), 
+                format!("a5")])
+    .make_proposal(format!("a6")); 
+
+    if let Ready::NewProposal(_, prop, _) = output{
+        mhs.check_proposal_with(
+            &ExpectedState::PropsalBaseOn(format!("a4"), &prop), 
+        );
+    }else{
+        unreachable!()
+    }
+}
+
+#[test]
+#[ignore = "unimplemented"]
+fn test_corrupted_new_view_msg(){
+    // init <- a1 
+    // 
+    // recv corrupted new view msgs. Machine must validate NewView Msg before further processing. 
+}
 
 #[test]
 #[ignore = "unimplemented"]
@@ -145,6 +196,16 @@ fn test_corrupted_vote(){
         format!("a1"), 
         format!("a2"), 
     ]);
-
     // TODO: 
 }
+
+#[test]
+#[ignore = "unimplemented"]
+fn test_commit_failed_proposal(){
+    // init <- a1 <- a2 (failed) <- a3 <- a4 <- a5 <- a6
+    //  
+    // Leader failed to form a QC for a2 at view 2. 
+    // once recv 3 qc of a3, replica will commit    
+    
+}
+

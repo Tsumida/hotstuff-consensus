@@ -49,7 +49,7 @@ pub enum Ready {
     Nil,
     //
     InternalState(Context, Box<Snapshot>),
-    // New proposal and it's justify.
+    // Form new proposal. 
     NewProposal(Context, Arc<TreeNode>, Arc<GenericQC>),
     //
     UpdateQCHigh(Context, Arc<TreeNode>, Arc<GenericQC>),
@@ -75,7 +75,7 @@ pub trait Safety {
     ) -> Result<Ready>;
 
     /// Form new proposal for queueing transactions. 
-    fn on_beat(&mut self, proposal: &TreeNode) -> Result<Ready>;
+    fn on_beat(&mut self, cmds: Vec<Txn>) -> Result<Ready>;
 
     /// commit nodes and return the latest state about commitment. 
     fn on_commit(&mut self, node: &TreeNode) -> Result<Ready>;
@@ -171,10 +171,12 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     }
 
     // start prposal
-    fn on_beat(&mut self, proposal: &TreeNode) -> Result<Ready> {
+    fn on_beat(&mut self, cmds: Vec<Txn>) -> Result<Ready> {
+        let proposal = self.make_leaf(&cmds);
         info!("{} beats", self.self_id);
-        self.storage.update_leaf(proposal);
-        Ok(Ready::Nil)
+        self.storage.update_leaf(&proposal);
+        let justify = self.storage.get_qc(&proposal.justify).unwrap(); 
+        Ok(Ready::NewProposal(self.get_context(), Arc::new(*proposal), justify))
     }
 
     // TODO: add validating. 
@@ -300,8 +302,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
             SafetyEvent::NewTx(cmds) => {
                 // TODO: use mem pool
                 // let cmds = vec![cmd];
-                let node = self.make_leaf(&cmds);
-                self.on_beat(&node)
+                self.on_beat(cmds)
             }
             SafetyEvent::RecvNewViewMsg(_, _, qc_high) => {
                 // note: recv largest qc_high

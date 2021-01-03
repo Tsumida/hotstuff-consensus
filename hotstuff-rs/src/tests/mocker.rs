@@ -1,12 +1,14 @@
 //! Mocker for testing.
-use std::{hash::Hash, mem::MaybeUninit, unimplemented};
+use std::{mem::MaybeUninit, unimplemented, vec};
 use std::collections::{HashMap};
 use std::sync::Arc; 
 
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare, Signature};
+use log::{debug};
 use simplelog::{CombinedLogger, WriteLogger,  LevelFilter, Config};
 
-use crate::{msg::Context, safety::{basic::*, machine::{Machine, Ready, Safety, SafetyErr}, voter::Voter}, safety_storage::in_mem::InMemoryStorage};
+
+use crate::{msg::Context, safety::{basic::*, machine::{Machine, Ready, Safety, SafetyErr, SafetyEvent}, voter::Voter}, safety_storage::in_mem::InMemoryStorage};
 
 pub(crate) fn init_logger(){
     let _ = CombinedLogger::init(
@@ -30,9 +32,10 @@ pub(crate) fn threshold_sign_kit(
     (s, pks, vec_sk)
 }
 
-pub enum ExpectedState {
+pub enum ExpectedState<'a> {
     LockedInHeight(usize),
     CommittedBeforeHeight(usize),
+    PropsalBaseOn(String, &'a TreeNode),
 }
 
 pub struct MockHotStuff {
@@ -112,10 +115,13 @@ impl MockHotStuff {
         self.pks = Some(b);
         self.sks = c;
 
+
         let init_node = Arc::new(TreeNode::genesis());
         let init_qc = Arc::new(GenericQC::genesis(0, &init_node));
         let init_node_hash = TreeNode::hash(&init_node); 
         let init_qc_hash = GenericQC::hash(&init_qc); 
+
+        self.tx_to_hash.insert(format!("init"), init_node_hash.clone());
 
         let view = 0;
         let mut node_pool  = HashMap::new();
@@ -130,7 +136,7 @@ impl MockHotStuff {
         let storage = InMemoryStorage::new(node_pool, qc_map, view, &init_node, self.qc_high.as_ref());
         let testee: Machine<InMemoryStorage> = Machine::new(
             voter,
-            format!("testee-{}", self.testee_id), 
+            format!("{}", self.testee_id), 
             self.n, 
             Some(format!("{}", self.leader_id)), 
             storage,
@@ -140,7 +146,8 @@ impl MockHotStuff {
         self.init_done = true;
     }
 
-    /// Construct chain for testee. 
+    /// Construct chain for testee. Note that no qc of last proposal is formed!
+    /// For example `a1 <-qc- a2 <-qc- a3`, a1 has 2 qc, a2 has one, but qc of a3 isn't formed. 
     pub fn load_continue_chain(&mut self, cmds: Vec<String>) -> &mut Self {
         // It's init_qc now 
         let mut prev_qc= self.qc_high.clone(); 
@@ -202,7 +209,6 @@ impl MockHotStuff {
 
         // form qc of parent and use it to create new proposal. 
         let qc = self.form_corrupted_qc(self.height, &parent_hash);
-
         let res = self.propose(&parent_hash, tx, qc);
 
         assert!(
@@ -212,6 +218,48 @@ impl MockHotStuff {
                 false
             }
         );
+    }
+
+    /// Leader recv txs from other 
+    pub fn recv_new_view_msg(&mut self, num: usize, txs: Vec<String>) -> &mut Self{
+        assert!(num >= 1 && num <= self.n);
+        for (i, tx) in txs.iter().enumerate(){
+            let node_hash = self.tx_to_hash.get(tx).unwrap(); 
+            debug!("{:?}", &node_hash);
+            let node = self.nodes.get(node_hash).unwrap();
+            let qc = self.qcs.get(&node.justify).unwrap();
+            let _ = self.testee.as_mut().unwrap().process_safety_event(
+            SafetyEvent::RecvNewViewMsg(
+                    Context{
+                        from: format!("{}", i), 
+                        view: self.height, 
+                    }, 
+                    node.clone(), 
+                    qc.clone()
+                ) 
+            ).unwrap();
+        }
+        self
+    }
+
+    pub fn make_proposal(&mut self, new_tx: String) -> Ready{
+        self.testee
+        .as_mut()
+        .unwrap()
+        .process_safety_event(SafetyEvent::NewTx(vec![Txn::new(new_tx)]))
+        .unwrap()
+    }
+
+    pub fn check_proposal_with(&self, expected: &ExpectedState) -> &Self{
+        match expected{
+            ExpectedState::PropsalBaseOn(parent, prop) => {
+                let parent = self.tx_to_hash.get(parent).unwrap();
+                assert_eq!(parent, &prop.parent);
+            }, 
+            _ => panic!("invalided expected state for this method"), 
+        }
+
+        self
     }
 
     fn propose(&mut self, parent_hash:&NodeHash, tx: String, qc: Arc<GenericQC>) -> Result<Ready, SafetyErr>{

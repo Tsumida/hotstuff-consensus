@@ -97,12 +97,10 @@ impl SafetyStorage for InMemoryStorage {
     }
 
     fn update_leaf(&mut self, new_leaf: &TreeNode) {
-        if self.vheight < new_leaf.height {
-            self.vheight = new_leaf.height;
-            self.leaf = Arc::new(new_leaf.clone());
-            self.node_pool
-                .insert(TreeNode::hash(new_leaf), self.leaf.clone());
-        }
+        self.vheight = new_leaf.height;
+        self.leaf = Arc::new(new_leaf.clone());
+        self.node_pool
+            .insert(TreeNode::hash(new_leaf), self.leaf.clone());
     }
 
     fn get_leaf(&self) -> Arc<TreeNode> {
@@ -122,7 +120,7 @@ impl SafetyStorage for InMemoryStorage {
                 self.qc_high = Arc::new(new_qc_high.clone());
                 self.vheight = new_qc_node.height;
                 self.update_leaf(new_qc_node);
-                debug!("update qc-high");
+                debug!("update qc-high(h={})", qc_node.height);
             }
         }
     }
