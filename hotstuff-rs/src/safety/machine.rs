@@ -167,13 +167,18 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         !conflicting || b
     }
 
-    // start prposal
+    // Make new proposal. Note that leader will sign it first. 
     fn on_beat(&mut self, cmds: Vec<Txn>) -> Result<Ready> {
         let proposal = self.make_leaf(&cmds);
         self.storage.update_leaf(&proposal);
-        // let justify = self.storage.get_qc(&proposal.justify).unwrap(); 
         let justify = self.storage.get_qc_high();
-        Ok(Ready::NewProposal(self.get_context(), Arc::new(*proposal), justify))
+        let ctx = self.get_context(); 
+
+        let sign = self.voter.sign(&proposal);
+        let sign_kit = SignKit::from((*sign, self.voter.sign_id()));
+        self.voter.add_vote(&ctx, &sign_kit).unwrap();
+        
+        Ok(Ready::NewProposal(ctx, Arc::new(*proposal), justify))
     }
 
     // TODO: add validating. 
@@ -215,7 +220,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     // TODO: add validating
     fn on_recv_proposal(
         &mut self,
-        ctx: &Context,
+        _: &Context,
         prop: &TreeNode,
         justify: &GenericQC,
     ) -> Result<Ready> {
@@ -297,8 +302,6 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 self.on_recv_vote(&ctx, node.as_ref(), sign.as_ref())
             }
             SafetyEvent::NewTx(cmds) => {
-                // TODO: use mem pool
-                // let cmds = vec![cmd];
                 self.on_beat(cmds)
             }
             SafetyEvent::RecvNewViewMsg(_, qc_high) => {

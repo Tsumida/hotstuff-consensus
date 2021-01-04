@@ -33,8 +33,12 @@ pub(crate) fn threshold_sign_kit(
 }
 
 pub enum ExpectedState<'a> {
+    // for hotstuff status
     LockedAt(String),
     CommittedBeforeHeight(usize),
+    QcHighOf(String),
+
+    // for proposal
     ParentIs(String, &'a TreeNode),
     QcOf(String, &'a TreeNode),
 }
@@ -60,6 +64,8 @@ pub struct MockHotStuff {
     leader_id: usize,
     testee_id: usize,
     init_done: bool, 
+
+    adversial: Option<usize>, 
 }
 
 impl MockHotStuff {
@@ -89,6 +95,7 @@ impl MockHotStuff {
             testee_id: 0,
 
             init_done: false, 
+            adversial: None, 
         }
     }
 
@@ -101,6 +108,12 @@ impl MockHotStuff {
     pub fn specify_testee(&mut self, testee: usize) -> &mut Self {
         assert!(testee < self.n);
         self.testee_id = testee;
+        self
+    }
+
+    pub fn specify_adversial(&mut self, adversial: usize) -> &mut Self{
+        assert!(adversial < self.n);
+        self.adversial = Some(adversial); 
         self
     }
 
@@ -150,31 +163,29 @@ impl MockHotStuff {
 
     /// Construct chain for testee. Note that no qc of last proposal is formed!
     /// For example `a1 <-qc- a2 <-qc- a3`, a1 has 2 qc, a2 has one, but qc of a3 isn't formed. 
-    pub fn load_continue_chain(&mut self, cmds: Vec<String>) -> &mut Self {
+    pub fn recv_consecutive_proposals(&mut self, cmds: Vec<String>) -> &mut Self {
         // It's init_qc now 
         let mut prev_qc= self.qc_high.clone(); 
-        let mut view = 0;
         for cmd in cmds{
-            view += 1;
+            self.height += 1;
             // make node
             let (node, hash) = 
-            TreeNode::node_and_hash(vec![&Txn::new(cmd.as_bytes())], view, &self.parent, &GenericQC::hash(self.qc_high.as_ref()));
+            TreeNode::node_and_hash(vec![&Txn::new(cmd.as_bytes())], self.height, &self.parent, &GenericQC::hash(self.qc_high.as_ref()));
 
             assert!(self.send_correct_proposal(node.as_ref(), prev_qc.as_ref()).is_ok());
 
             // make qc with signs from replicas, 
-            prev_qc = self.form_qc(view, &node, &hash);
+            prev_qc = self.form_qc(self.height, &node, &hash);
     
             // update state
-            self.update(cmd, view, prev_qc.clone(), node, hash);
+            self.update(cmd, self.height, prev_qc.clone(), node, hash);
         }
-        self.height = view; 
         self
     }
 
     /// Assertion about internal state of hotstuff module. 
     /// Panic if assertion failed.  
-    pub fn check_with_expected_state(&self, expected: &ExpectedState){
+    pub fn check_hotstuff_state_with(&self, expected: &ExpectedState){
         let ss = self.testee.as_ref().unwrap().take_snapshot(); 
         match expected{
             ExpectedState::LockedAt(tx) => {
@@ -184,7 +195,12 @@ impl MockHotStuff {
             }, 
             ExpectedState::CommittedBeforeHeight(h) => {
                 assert!(ss.last_committed >= *h as u64, format!("{:?}", ss)); 
-            }
+            }, 
+            ExpectedState::QcHighOf(tx) => {
+                let prop_hash = self.tx_to_hash.get(tx).unwrap(); 
+                let (qc_node_hash, _) = self.nodes.get_key_value(&ss.qc_high.node).unwrap();
+                assert_eq!(qc_node_hash, prop_hash); 
+            },
             _ => unimplemented!(),
         }; 
     }
@@ -249,11 +265,21 @@ impl MockHotStuff {
 
     pub fn make_proposal(&mut self, new_tx: String) -> Ready{
         self.tick();
+
         let res = self.testee
         .as_mut()
         .unwrap()
-        .process_safety_event(SafetyEvent::NewTx(vec![Txn::new(new_tx)]))
+        .process_safety_event(SafetyEvent::NewTx(vec![Txn::new(new_tx.clone())]))
         .unwrap();
+
+        // update mocker
+        match &res{
+            Ready::NewProposal(_, node, prev_qc) => {
+                let hash = Box::new(TreeNode::hash(&node));
+                self.update(new_tx, self.height, prev_qc.clone(), Box::new(node.as_ref().clone()), hash);
+            }, 
+            _ => panic!(),
+        }
         res
     }
 
@@ -267,26 +293,64 @@ impl MockHotStuff {
                 let qc_node_hash = self.tx_to_hash.get(qc_node_tx).unwrap();
                 let prop_justify_node_hash = &self.qcs.get(&prop.justify).unwrap().node;
                 assert_eq!(qc_node_hash, prop_justify_node_hash);
-            }
+            },
+            
             _ => panic!("invalided expected state for this method"), 
         }
         self
     }
 
     /// Recv one corrupted new-view msg. 
-    pub fn recv_corrupted_view_msg(&mut self, prev_tx: String, tx: String) -> &mut Self{
-        let prev_hash = self.tx_to_hash.get(&prev_tx).unwrap();
-        let qc = self.form_corrupted_qc(self.height, prev_hash); 
-        let qc_hash = GenericQC::hash(&qc); 
-        let node = TreeNode::new(&vec![Txn::new(tx.as_bytes())], self.height, prev_hash, &qc_hash);
-        let _ = self.testee.as_mut().unwrap().on_recv_proposal(
-            &Context{
-                from: format!("{}", self.leader_id), 
-                view: self.height, 
-            }, 
-            &node, 
-            &qc, 
+    pub fn recv_corrupted_view_msg(&mut self, qc_node: String) -> &mut Self{
+        let prev_qc_hash = self.tx_to_hash.get(&qc_node).unwrap();
+        let prev_qc = self.form_corrupted_qc(self.height, prev_qc_hash); 
+        let _ = self.testee.as_mut().unwrap().process_safety_event(
+            SafetyEvent::RecvNewViewMsg(
+                Context{
+                    from: format!("{}", self.adversial.unwrap()), 
+                    view: self.height, 
+                }, 
+                prev_qc, 
+            )
         );
+        self
+    }
+
+    pub fn recv_votes(&mut self, votes: Vec<MockEvent>) -> &mut Self{
+        for vote in votes{
+            match vote{
+                MockEvent::AcceptedVote(from, tx) => {
+                    let node_hash = self.tx_to_hash.get(&tx).unwrap(); 
+                    let node = self.nodes.get(node_hash).unwrap(); 
+                    let sign = self.sk.as_ref().unwrap().secret_key_share(from).sign(&node.to_be_bytes());
+
+                    let _ = self.testee.as_mut().unwrap()
+                    .on_recv_vote(&Context{
+                            from: format!("{}", from), 
+                            view: self.height, 
+                        }, 
+                        &node, 
+                        &SignKit::from((sign, from))
+                    );
+                }, 
+                MockEvent::CorruptedVote(from, tx) => {
+                    let node_hash = self.tx_to_hash.get(&tx).unwrap(); 
+                    let node = self.nodes.get(node_hash).unwrap(); 
+                    let sign = self.form_corrupted_sign();
+                    let err = self.testee.as_mut().unwrap()
+                    .on_recv_vote(&Context{
+                            from: format!("{}", from), 
+                            view: self.height, 
+                        }, 
+                        &node, 
+                        &SignKit::from((sign, from))
+                    );
+
+                    assert!(err.is_err());
+                }, 
+                _ => panic!("invalid input"),
+            }; 
+        }
         self
     }
 
@@ -294,6 +358,12 @@ impl MockHotStuff {
     fn tick(&mut self){
         self.height += 1; 
         self.testee.as_mut().unwrap().on_view_change(format!("{}", self.leader_id), self.height).unwrap();
+    }
+
+    fn form_corrupted_sign(&self) -> Sign{
+        unsafe {
+            MaybeUninit::uninit().assume_init()
+        }
     }
 
     fn propose(&mut self, parent_hash:&NodeHash, tx: String, qc: Arc<GenericQC>) -> Result<Ready, SafetyErr>{
@@ -333,7 +403,6 @@ impl MockHotStuff {
     }
 
     fn form_corrupted_qc(&self, view: ViewNumber, node_hash: &NodeHash) -> Arc<GenericQC>{
-        
         let combined_sign: Signature = unsafe{
             MaybeUninit::uninit().assume_init()
         };
@@ -349,6 +418,10 @@ impl MockHotStuff {
         self.nodes.insert(TreeNode::hash(node.as_ref()), Arc::new(*node));
         self.qcs.insert(GenericQC::hash(prev_qc.as_ref()), self.qc_high.clone());
     }
-
 }
 
+pub enum MockEvent{
+    // from, tx
+    CorruptedVote(usize, String), 
+    AcceptedVote(usize, String), 
+}
