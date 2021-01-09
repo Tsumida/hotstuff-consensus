@@ -3,9 +3,9 @@ use std::sync::Arc;
 use log::{debug, error, info};
 use thiserror::Error;
 
-use super::voter::Voter;
-use super::{basic::*, voter};
-use crate::{msg::Context};
+use super::basic::*;
+use super::voter::{VoteErr, Voter};
+use crate::msg::Context;
 use crate::msg::*;
 use crate::traits::*;
 
@@ -46,7 +46,7 @@ pub enum Ready {
     Nil,
     //
     InternalState(Context, Snapshot),
-    // Form new proposal. 
+    // Form new proposal.
     NewProposal(Context, Arc<TreeNode>, Arc<GenericQC>),
     //
     UpdateQCHigh(Context, Arc<TreeNode>, Arc<GenericQC>),
@@ -56,14 +56,14 @@ pub enum Ready {
     CommitState(Context, ViewNumber),
 }
 
-/// Safety defines replica's reaction to message from other hotstuff peers. 
-/// Any Message received must be validated before further processing. 
+/// Safety defines replica's reaction to message from other hotstuff peers.
+/// Any Message received must be validated before further processing.
 pub trait Safety {
-    // As leader, recv vote from a certain replica. Return `Ready::Nil` if the vote is valid. 
+    // As leader, recv vote from a certain replica. Return `Ready::Nil` if the vote is valid.
     fn on_recv_vote(&mut self, ctx: &Context, node: &TreeNode, sign: &SignKit) -> Result<Ready>;
 
-    /// Reaction to a new proposal. 
-    /// Return `Ready::Nil` for rejecting, otherwise return `Ready::Signature` for accepting. 
+    /// Reaction to a new proposal.
+    /// Return `Ready::Nil` for rejecting, otherwise return `Ready::Signature` for accepting.
     fn on_recv_proposal(
         &mut self,
         ctx: &Context,
@@ -71,10 +71,10 @@ pub trait Safety {
         justify: &GenericQC,
     ) -> Result<Ready>;
 
-    /// Form new proposal for queueing transactions. 
+    /// Form new proposal for queueing transactions.
     fn on_beat(&mut self, cmds: Vec<Txn>) -> Result<Ready>;
 
-    /// commit nodes and return the latest state about commitment. 
+    /// commit nodes and return the latest state about commitment.
     fn on_commit(&mut self, node: &TreeNode) -> Result<Ready>;
 
     fn on_view_change(&mut self, leader: ReplicaID, view: ViewNumber) -> Result<Ready>;
@@ -97,16 +97,16 @@ pub enum SafetyErr {
     InvalidLeader(ReplicaID),
 
     #[error("error in voting: {0}")]
-    VoterError(voter::VoteErr),
-    
-    #[error("corrupted vote")]
-    CorruptedVote, 
+    VoterError(VoteErr),
 
-    // Note that for case init <- a1 <- a2 <- a3, all of them were proposed by correct leader. 
-    // if we didn't recv a2 before a3 carrying qc of a2, 
-    // we actually can't recongnize whether this qc is corrupted or correct. 
+    #[error("corrupted vote")]
+    CorruptedVote,
+
+    // Note that for case init <- a1 <- a2 <- a3, all of them were proposed by correct leader.
+    // if we didn't recv a2 before a3 carrying qc of a2,
+    // we actually can't recongnize whether this qc is corrupted or correct.
     #[error("corrupted qc")]
-    CorruptedQC, 
+    CorruptedQC,
 }
 
 pub struct Machine<S: SafetyStorage> {
@@ -115,7 +115,7 @@ pub struct Machine<S: SafetyStorage> {
     voter: Voter,
 
     // config related
-    total: usize, 
+    total: usize,
     self_id: ReplicaID,
     leader_id: Option<ReplicaID>,
     //input: Receiver<SafetyEvent>,
@@ -156,34 +156,35 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     }
 
     fn safe_node(&mut self, node: &TreeNode, justify_node: &TreeNode) -> bool {
-        let locked = self.storage.get_locked_node(); 
-        let conflicting = self
-            .storage
-            .is_conflicting(node, &locked);
+        let locked = self.storage.get_locked_node();
+        let conflicting = self.storage.is_conflicting(node, &locked);
 
         let b = justify_node.height > locked.height;
-        
-        debug!("safe_node() for node with h = {}: {} - {}", &node.height, !conflicting, b);
+
+        debug!(
+            "safe_node() for node with h = {}: {} - {}",
+            &node.height, !conflicting, b
+        );
         !conflicting || b
     }
 
-    // Make new proposal. Note that leader will sign it first. 
+    // Make new proposal. Note that leader will sign it first.
     fn on_beat(&mut self, cmds: Vec<Txn>) -> Result<Ready> {
         let proposal = self.make_leaf(&cmds);
         self.storage.update_leaf(&proposal);
         let justify = self.storage.get_qc_high();
-        let ctx = self.get_context(); 
+        let ctx = self.get_context();
 
         let sign = self.voter.sign(&proposal);
         let sign_kit = SignKit::from((*sign, self.voter.sign_id()));
         self.voter.add_vote(&ctx, &sign_kit).unwrap();
-        
+
         Ok(Ready::NewProposal(ctx, Arc::new(*proposal), justify))
     }
 
-    // TODO: add validating. 
+    // TODO: add validating.
     fn on_recv_vote(&mut self, ctx: &Context, prop: &TreeNode, sign: &SignKit) -> Result<Ready> {
-        if !self.voter.validate_vote(prop, sign){
+        if !self.voter.validate_vote(prop, sign) {
             return Err(SafetyErr::CorruptedVote);
         }
         if let Err(e) = self.voter.add_vote(ctx, sign) {
@@ -224,32 +225,33 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         prop: &TreeNode,
         justify: &GenericQC,
     ) -> Result<Ready> {
-        if let Some(qc_node) = self.storage.get_node(&justify.node){
+        if let Some(qc_node) = self.storage.get_node(&justify.node) {
             // any correct qc has combined signature except for init_qc.
-            if !GenericQC::is_init_qc(&justify){
-                let valid = self.voter.validate_qc(&qc_node, justify.combined_sign.as_ref().unwrap()); 
-                debug!("recv prop validate: {}",valid); 
+            if !GenericQC::is_init_qc(&justify) {
+                let valid = self
+                    .voter
+                    .validate_qc(&qc_node, justify.combined_sign.as_ref().unwrap());
+                debug!("recv prop validate: {}", valid);
                 if !valid {
                     return Err(SafetyErr::CorruptedQC);
                 }
             }
-        }else{
-            debug!("prop.justify.node not found"); 
+        } else {
+            debug!("prop.justify.node not found");
             return Err(SafetyErr::CorruptedQC);
         }
 
         self.storage.append_new_qc(justify);
-        info!("recv proposal with h = {}", prop.height); 
-                
+        info!("recv proposal with h = {}", prop.height);
+
         let mut ready = Ready::Nil;
         if let Some(prev_node) = self.storage.find_node_by_qc(&prop.justify) {
-            if prop.height > self.storage.get_vheight()
-                && self.safe_node(prop, prev_node.as_ref())
+            if prop.height > self.storage.get_vheight() && self.safe_node(prop, prev_node.as_ref())
             {
                 self.storage.append_new_node(&prop);
                 // sign
                 let kit = SignKit::from((*self.voter.sign(prop), self.voter.sign_id()));
-                
+
                 ready = Ready::Signature(
                     Context {
                         view: self.storage.get_view(),
@@ -282,10 +284,10 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         Ok(ready)
     }
 
-    // TODO: let storage do  job. 
+    // TODO: let storage do  job.
     fn take_snapshot(&self) -> Snapshot {
-        let mut ss = self.storage.hotstuff_status(); 
-        ss.leader = self.leader_id.clone(); 
+        let mut ss = self.storage.hotstuff_status();
+        ss.leader = self.leader_id.clone();
         ss
     }
 
@@ -301,9 +303,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
             SafetyEvent::RecvSign(ctx, node, sign) => {
                 self.on_recv_vote(&ctx, node.as_ref(), sign.as_ref())
             }
-            SafetyEvent::NewTx(cmds) => {
-                self.on_beat(cmds)
-            }
+            SafetyEvent::NewTx(cmds) => self.on_beat(cmds),
             SafetyEvent::RecvNewViewMsg(_, qc_high) => {
                 // note: recv largest qc_high
                 let qc_node = self.storage.get_node(&qc_high.node).unwrap();
@@ -328,7 +328,6 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 Ok(Ready::Nil)
             }
         }
-        
     }
 }
 
@@ -351,12 +350,12 @@ impl<S: SafetyStorage> Machine<S> {
         }
     }
 
-    // TODO: consider use parent as prop.justify.node 
-    // 
+    // TODO: consider use parent as prop.justify.node
+    //
     // init <- a1 <- a2 (abandon)
     //          |
-    //          <--- a3     
-    //  
+    //          <--- a3
+    //
     fn make_leaf(&self, cmds: &Vec<Txn>) -> Box<TreeNode> {
         let prev_leaf = self.storage.get_leaf();
         let parent = TreeNode::hash(prev_leaf.as_ref());
@@ -366,15 +365,19 @@ impl<S: SafetyStorage> Machine<S> {
         node
     }
 
-    pub fn new(voter: Voter, self_id: String, total: usize, leader_id: Option<String>, storage: S) -> Self{
-        Self{
+    pub fn new(
+        voter: Voter,
+        self_id: String,
+        total: usize,
+        leader_id: Option<String>,
+        storage: S,
+    ) -> Self {
+        Self {
             voter,
-            self_id, 
-            total, 
-            leader_id, 
-            storage, 
+            self_id,
+            total,
+            leader_id,
+            storage,
         }
     }
-
-    
 }

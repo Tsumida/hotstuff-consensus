@@ -1,8 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::msg::{Snapshot};
-use crate::safety::basic::*;
+use crate::msg::Snapshot;
+use crate::safety::basic::{
+    CombinedSign, GenericQC, NodeHash, QCHash, Sign, SignID, TreeNode, ViewNumber,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestType {
@@ -72,7 +74,7 @@ pub trait SafetyStorage {
 
     fn get_leaf(&self) -> Arc<TreeNode>;
 
-    // Check height before update leaf. 
+    // Check height before update leaf.
     fn update_leaf(&mut self, new_leaf: &TreeNode);
 
     fn get_locked_node(&self) -> Arc<TreeNode>;
@@ -90,8 +92,8 @@ pub trait SafetyStorage {
 
     fn commit(&mut self, node: &TreeNode);
 
-    // Get height of last voted node. 
+    // Get height of last voted node.
     fn get_vheight(&self) -> ViewNumber;
 
-    fn hotstuff_status(&self) -> Snapshot; 
+    fn hotstuff_status(&self) -> Snapshot;
 }

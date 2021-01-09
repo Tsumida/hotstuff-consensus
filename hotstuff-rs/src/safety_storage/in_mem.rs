@@ -25,9 +25,15 @@ pub struct InMemoryStorage {
     b_locked: Arc<TreeNode>,
 }
 
-impl InMemoryStorage{
-    pub fn new(node_pool: HashMap<NodeHash, Arc<TreeNode>>, qc_map: HashMap<QCHash, Arc<GenericQC>>, view: ViewNumber, init_node: &TreeNode, init_qc: &GenericQC) -> Self{
-        Self{
+impl InMemoryStorage {
+    pub fn new(
+        node_pool: HashMap<NodeHash, Arc<TreeNode>>,
+        qc_map: HashMap<QCHash, Arc<GenericQC>>,
+        view: ViewNumber,
+        init_node: &TreeNode,
+        init_qc: &GenericQC,
+    ) -> Self {
+        Self {
             node_pool,
             qc_map,
             view,
@@ -97,7 +103,6 @@ impl SafetyStorage for InMemoryStorage {
     }
 
     fn update_leaf(&mut self, new_leaf: &TreeNode) {
-        debug!("update leaf {:?}", new_leaf);
         self.vheight = new_leaf.height;
         self.leaf = Arc::new(new_leaf.clone());
         self.node_pool
@@ -187,10 +192,13 @@ impl SafetyStorage for InMemoryStorage {
         let b_2 = chain.get(1).unwrap().as_ref();
         let b = chain.get(2).unwrap().as_ref();
 
-        let pred_32 = &b_3.parent == &TreeNode::hash(b_2); 
-        let pred_21 = &b_2.parent == &TreeNode::hash(b); 
+        let pred_32 = &b_3.parent == &TreeNode::hash(b_2);
+        let pred_21 = &b_2.parent == &TreeNode::hash(b);
         // &b_3.parent == &TreeNode::hash(b_2) && &b_2.parent == &TreeNode::hash(b)
-        debug!("consecutive judge with h = {},{},{}: {} - {}", b_3.height, b_2.height, b.height, pred_32, pred_21);
+        debug!(
+            "consecutive judge with h = {},{},{}: {} - {}",
+            b_3.height, b_2.height, b.height, pred_32, pred_21
+        );
         pred_32 && pred_21
     }
 
@@ -198,11 +206,11 @@ impl SafetyStorage for InMemoryStorage {
         self.vheight
     }
 
-    // TODO: add informer for watchers. 
+    // TODO: add informer for watchers.
     fn commit(&mut self, to_commit: &TreeNode) {
-        if self.commit_height >= to_commit.height{
+        if self.commit_height >= to_commit.height {
             debug!("to_commit with smaller height {}", to_commit.height);
-            return; 
+            return;
         }
         let to_commit_height = to_commit.height;
         for h in self.commit_height + 1..=to_commit_height {
@@ -210,18 +218,20 @@ impl SafetyStorage for InMemoryStorage {
             self.commit_height = h;
         }
         self.b_executed = Arc::new(to_commit.clone());
-        info!("commit new proposal, commit_height = {}", self.commit_height);
+        info!(
+            "commit new proposal, commit_height = {}",
+            self.commit_height
+        );
     }
 
     fn hotstuff_status(&self) -> Snapshot {
-        Snapshot{
+        Snapshot {
             view: self.view,
-            leader: None,  
-            qc_high: Box::new(self.qc_high.as_ref().clone()), 
-            leaf: Box::new(self.leaf.as_ref().clone()), 
-            locked_node: Box::new(self.b_locked.as_ref().clone()), 
-            last_committed: self.commit_height, 
+            leader: None,
+            qc_high: Box::new(self.qc_high.as_ref().clone()),
+            leaf: Box::new(self.leaf.as_ref().clone()),
+            locked_node: Box::new(self.b_locked.as_ref().clone()),
+            last_committed: self.commit_height,
         }
     }
 }
-
