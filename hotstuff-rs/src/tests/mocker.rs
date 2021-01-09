@@ -12,7 +12,7 @@ use crate::{
     safety::{
         basic::*,
         machine::{Machine, Ready, Safety, SafetyErr, SafetyEvent},
-        safety_storage::in_mem::InMemoryStorage,
+        safety_storage::{in_mem::InMemoryStorage, Snapshot},
         voter::Voter,
     },
 };
@@ -486,6 +486,29 @@ impl MockHotStuff {
             .insert(TreeNode::hash(node.as_ref()), Arc::new(*node));
         self.qcs
             .insert(GenericQC::hash(prev_qc.as_ref()), self.qc_high.clone());
+    }
+
+    fn take_snapshot(&mut self) -> Snapshot {
+        if let Ready::InternalState(_, ss) = self
+            .testee
+            .as_mut()
+            .unwrap()
+            .process_safety_event(SafetyEvent::RequestSnapshot)
+            .unwrap()
+        {
+            ss
+        } else {
+            panic!()
+        }
+    }
+
+    pub fn status(&mut self) {
+        let ss = self.take_snapshot();
+        for (k, v) in &self.tx_to_hash {
+            println!("{:?}-{:?}", k, v);
+        }
+
+        println!("{:?}\n\n", ss);
     }
 }
 

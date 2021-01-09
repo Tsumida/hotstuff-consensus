@@ -131,14 +131,14 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     /// Note that
     fn update_nodes(&mut self, node: &TreeNode) -> Result<Ready> {
         let chain = self.storage.find_three_chain(node);
-        let locked = self.storage.get_locked_node();
         let mut ready = Ready::Nil;
         // debug!("find chain with {} nodes", chain.len());
         if let Some(b_3) = chain.get(0) {
-            self.storage.update_qc_high(b_3.as_ref(), b_3.justify());
+            self.storage.update_qc_high(b_3.as_ref(), node.justify());
         }
 
         if let Some(b_2) = chain.get(1) {
+            let locked = self.storage.get_locked_node();
             if b_2.height() > locked.height() {
                 self.storage.update_locked_node(b_2.as_ref());
             }
@@ -351,17 +351,10 @@ impl<S: SafetyStorage> Machine<S> {
         }
     }
 
-    // TODO: consider use parent as prop.justify.node
-    //
-    // init <- a1 <- a2 (abandon)
-    //          |
-    //          <--- a3
-    //
     fn make_leaf(&self, cmds: &Vec<Txn>) -> Box<TreeNode> {
         let prev_leaf = self.storage.get_leaf();
         let parent = TreeNode::hash(prev_leaf.as_ref());
         let justify = self.storage.get_qc_high();
-
         let (node, _) = TreeNode::node_and_hash(cmds, self.storage.get_view(), &parent, &justify);
         node
     }

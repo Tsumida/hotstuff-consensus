@@ -52,6 +52,7 @@ impl SafetyStorage for InMemoryStorage {
     fn append_new_node(&mut self, node: &TreeNode) {
         let h = TreeNode::hash(node);
         self.node_pool.insert(h, Arc::new(node.clone()));
+        // self.update_vheight(node.height());
     }
 
     // todo: refactor
@@ -86,14 +87,12 @@ impl SafetyStorage for InMemoryStorage {
 
     /// qc_high.node == qc_node.
     fn update_qc_high(&mut self, new_qc_node: &TreeNode, new_qc_high: &GenericQC) {
-        let qc_high = self.get_qc_high();
-        if let Some(qc_node) = self.node_pool.get(new_qc_high.node_hash()).cloned() {
-            let pred = new_qc_node.height() > qc_node.height();
-            if pred {
+        if let Some(qc_node) = self.node_pool.get(self.get_qc_high().node_hash()).cloned() {
+            if new_qc_node.height() > qc_node.height() {
                 self.qc_high = Arc::new(new_qc_high.clone());
-                self.vheight = new_qc_node.height();
+                // self.vheight = new_qc_node.height();
                 self.update_leaf(new_qc_node);
-                debug!("update qc-high(h={})", qc_node.height());
+                debug!("update qc-high(h={})", new_qc_node.height());
             }
         }
     }
