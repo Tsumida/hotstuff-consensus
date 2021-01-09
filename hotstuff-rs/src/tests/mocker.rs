@@ -12,9 +12,9 @@ use crate::{
     safety::{
         basic::*,
         machine::{Machine, Ready, Safety, SafetyErr, SafetyEvent},
+        safety_storage::in_mem::InMemoryStorage,
         voter::Voter,
     },
-    safety_storage::in_mem::InMemoryStorage,
 };
 
 pub(crate) fn init_logger() {
@@ -78,9 +78,9 @@ pub struct MockHotStuff {
 
 impl MockHotStuff {
     pub fn new(n: usize) -> Self {
-        let init_node = Arc::new(TreeNode::genesis());
-        let init_qc = Arc::new(GenericQC::genesis(0, &init_node));
-        let init_node_hash = TreeNode::hash(&init_node);
+        let init_node = Arc::new((*INIT_NODE).clone());
+        let init_qc = Arc::new((*INIT_QC).clone());
+        let init_node_hash = (*INIT_NODE_HASH).clone();
         // let init_qc_hash = GenericQC::hash(&init_qc);
 
         Self {
@@ -137,10 +137,10 @@ impl MockHotStuff {
         self.pks = Some(b);
         self.sks = c;
 
-        let init_node = Arc::new(TreeNode::genesis());
-        let init_qc = Arc::new(GenericQC::genesis(0, &init_node));
-        let init_node_hash = TreeNode::hash(&init_node);
-        let init_qc_hash = GenericQC::hash(&init_qc);
+        let init_node = Arc::new((*INIT_NODE).clone());
+        let init_qc = Arc::new((*INIT_QC).clone());
+        let init_node_hash = (*INIT_NODE_HASH).clone();
+        let init_qc_hash = (*INIT_QC_HASH).clone();
 
         self.tx_to_hash
             .insert(format!("init"), init_node_hash.clone());
@@ -187,12 +187,11 @@ impl MockHotStuff {
                 vec![&Txn::new(cmd.as_bytes())],
                 self.height,
                 &self.parent,
-                &GenericQC::hash(self.qc_high.as_ref()),
+                self.qc_high.as_ref(),
             );
 
-            assert!(self
-                .send_correct_proposal(node.as_ref(), prev_qc.as_ref())
-                .is_ok());
+            let res = self.send_correct_proposal(node.as_ref(), prev_qc.as_ref());
+            assert!(res.is_ok(), format!("{:?}", res));
 
             // make qc with signs from replicas,
             prev_qc = self.form_qc(self.height, &node, &hash);
@@ -211,14 +210,17 @@ impl MockHotStuff {
             ExpectedState::LockedAt(tx) => {
                 let node_hash = self.tx_to_hash.get(tx).unwrap();
                 let node = self.nodes.get(node_hash).unwrap();
-                assert!(ss.locked_node.height == node.height, format!("{:?}", node));
+                assert!(
+                    ss.locked_node.height() == node.height(),
+                    format!("{:?}", node)
+                );
             }
             ExpectedState::CommittedBeforeHeight(h) => {
                 assert!(ss.last_committed >= *h as u64, format!("{:?}", ss));
             }
             ExpectedState::QcHighOf(tx) => {
                 let prop_hash = self.tx_to_hash.get(tx).unwrap();
-                let (qc_node_hash, _) = self.nodes.get_key_value(&ss.qc_high.node).unwrap();
+                let (qc_node_hash, _) = self.nodes.get_key_value(ss.qc_high.node_hash()).unwrap();
                 assert_eq!(qc_node_hash, prop_hash);
             }
             _ => unimplemented!(),
@@ -265,7 +267,7 @@ impl MockHotStuff {
             let node_hash = self.tx_to_hash.get(tx).unwrap();
             debug!("{}, {:?}", tx, &node_hash);
             let node = self.nodes.get(node_hash).unwrap();
-            let qc = self.qcs.get(&node.justify).unwrap();
+            let qc = node.justify();
             let _ = self
                 .testee
                 .as_mut()
@@ -275,7 +277,7 @@ impl MockHotStuff {
                         from: format!("{}", i),
                         view: self.height,
                     },
-                    qc.clone(),
+                    Arc::new(qc.clone()),
                 ))
                 .unwrap();
         }
@@ -313,11 +315,11 @@ impl MockHotStuff {
         match expected {
             ExpectedState::ParentIs(parent, prop) => {
                 let parent = self.tx_to_hash.get(parent).unwrap();
-                assert_eq!(parent, &prop.parent);
+                assert_eq!(parent, prop.parent_hash());
             }
             ExpectedState::QcOf(qc_node_tx, prop) => {
                 let qc_node_hash = self.tx_to_hash.get(qc_node_tx).unwrap();
-                let prop_justify_node_hash = &self.qcs.get(&prop.justify).unwrap().node;
+                let prop_justify_node_hash = prop.justify().node_hash();
                 assert_eq!(qc_node_hash, prop_justify_node_hash);
             }
 
@@ -408,16 +410,14 @@ impl MockHotStuff {
         qc: Arc<GenericQC>,
     ) -> Result<Ready, SafetyErr> {
         // parent <- qc <- new_node
-
         // form qc of parent and use it to create new proposal.
         // let qc = self.form_qc(self.height, &parent_hash);
-        let qc_hash = Arc::new(GenericQC::hash(qc.as_ref()));
         self.tick();
         let (node, hash) = TreeNode::node_and_hash(
             vec![&Txn::new(tx.as_bytes())],
             self.height,
             parent_hash,
-            &qc_hash,
+            &qc,
         );
         let res = self.send_correct_proposal(&node, &qc);
         self.update(tx, self.height, qc, node, hash);

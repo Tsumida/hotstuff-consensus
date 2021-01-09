@@ -3,11 +3,15 @@ use std::sync::Arc;
 use log::{debug, error, info};
 use thiserror::Error;
 
-use super::basic::*;
-use super::voter::{VoteErr, Voter};
+use super::{
+    basic::*,
+    safety_storage::Snapshot,
+    voter::{VoteErr, Voter},
+};
 use crate::msg::Context;
 use crate::msg::*;
-use crate::traits::*;
+
+use super::safety_storage::SafetyStorage;
 
 pub type Result<T> = core::result::Result<T, SafetyErr>;
 
@@ -129,16 +133,13 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         let chain = self.storage.find_three_chain(node);
         let locked = self.storage.get_locked_node();
         let mut ready = Ready::Nil;
-
         // debug!("find chain with {} nodes", chain.len());
-
         if let Some(b_3) = chain.get(0) {
-            let b3_qc = self.storage.get_qc(&node.justify).unwrap();
-            self.storage.update_qc_high(b_3.as_ref(), b3_qc.as_ref());
+            self.storage.update_qc_high(b_3.as_ref(), b_3.justify());
         }
 
         if let Some(b_2) = chain.get(1) {
-            if b_2.height > locked.height {
+            if b_2.height() > locked.height() {
                 self.storage.update_locked_node(b_2.as_ref());
             }
         }
@@ -159,11 +160,13 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         let locked = self.storage.get_locked_node();
         let conflicting = self.storage.is_conflicting(node, &locked);
 
-        let b = justify_node.height > locked.height;
+        let b = justify_node.height() > locked.height();
 
         debug!(
             "safe_node() for node with h = {}: {} - {}",
-            &node.height, !conflicting, b
+            node.height(),
+            !conflicting,
+            b
         );
         !conflicting || b
     }
@@ -200,14 +203,13 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 // TODO: leaf as prop <=> no new proposal
                 Ok(combined_sign) => {
                     let prop_hash = TreeNode::hash(prop);
-                    let qc = GenericQC {
-                        // TODO: should be node.height?
-                        view: self.storage.get_view(),
-                        node: prop_hash,
-                        combined_sign: Some(*combined_sign),
-                    };
+                    let qc = GenericQC::new(
+                        // TODO: should be node.height()?
+                        self.storage.get_view(),
+                        &prop_hash,
+                        combined_sign.as_ref(),
+                    );
                     self.storage.update_qc_high(&prop, &qc);
-                    self.storage.append_new_qc(&qc);
                     info!("qc formed");
                     Ok(Ready::Nil)
                 }
@@ -225,12 +227,10 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         prop: &TreeNode,
         justify: &GenericQC,
     ) -> Result<Ready> {
-        if let Some(qc_node) = self.storage.get_node(&justify.node) {
+        if let Some(qc_node) = self.storage.get_node(justify.node_hash()) {
             // any correct qc has combined signature except for init_qc.
             if !GenericQC::is_init_qc(&justify) {
-                let valid = self
-                    .voter
-                    .validate_qc(&qc_node, justify.combined_sign.as_ref().unwrap());
+                let valid = self.voter.validate_qc(&qc_node, justify.combined_sign());
                 debug!("recv prop validate: {}", valid);
                 if !valid {
                     return Err(SafetyErr::CorruptedQC);
@@ -241,14 +241,15 @@ impl<S: SafetyStorage> Safety for Machine<S> {
             return Err(SafetyErr::CorruptedQC);
         }
 
-        self.storage.append_new_qc(justify);
-        info!("recv proposal with h = {}", prop.height);
+        info!("recv proposal with h = {}", prop.height());
 
         let mut ready = Ready::Nil;
-        if let Some(prev_node) = self.storage.find_node_by_qc(&prop.justify) {
-            if prop.height > self.storage.get_vheight() && self.safe_node(prop, prev_node.as_ref())
+        if let Some(prev_node) = self.storage.get_node(prop.justify().node_hash()) {
+            if prop.height() > self.storage.get_vheight()
+                && self.safe_node(prop, prev_node.as_ref())
             {
                 self.storage.append_new_node(&prop);
+                self.storage.update_vheight(prop.height());
                 // sign
                 let kit = SignKit::from((*self.voter.sign(prop), self.voter.sign_id()));
 
@@ -306,7 +307,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
             SafetyEvent::NewTx(cmds) => self.on_beat(cmds),
             SafetyEvent::RecvNewViewMsg(_, qc_high) => {
                 // note: recv largest qc_high
-                let qc_node = self.storage.get_node(&qc_high.node).unwrap();
+                let qc_node = self.storage.get_node(qc_high.node_hash()).unwrap();
                 self.storage
                     .update_qc_high(qc_node.as_ref(), qc_high.as_ref());
                 Ok(Ready::UpdateQCHigh(
@@ -359,7 +360,7 @@ impl<S: SafetyStorage> Machine<S> {
     fn make_leaf(&self, cmds: &Vec<Txn>) -> Box<TreeNode> {
         let prev_leaf = self.storage.get_leaf();
         let parent = TreeNode::hash(prev_leaf.as_ref());
-        let justify = GenericQC::hash(self.storage.get_qc_high().as_ref());
+        let justify = self.storage.get_qc_high();
 
         let (node, _) = TreeNode::node_and_hash(cmds, self.storage.get_view(), &parent, &justify);
         node
