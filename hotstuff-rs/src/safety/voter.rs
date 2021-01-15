@@ -1,10 +1,11 @@
-use super::basic::ViewNumber;
 use crate::msg::Context;
-use crate::safety::basic::{CombinedSign, ReplicaID, Sign, SignID, SignKit, TreeNode, PK, SK};
+use crate::safety::basic::{
+    CombinedSign, ReplicaID, Sign, SignID, SignKit, TreeNode, ViewNumber, PK, SK,
+};
 use std::collections::HashMap;
 use thiserror::Error;
 
-use log::{error};
+use log::error;
 
 #[derive(Debug, Clone, Error)]
 pub enum VoteErr {
@@ -28,7 +29,7 @@ pub struct Voter {
     pks: PK,
     sks: SK,
     voting_set: HashMap<ReplicaID, SignKit>,
-    
+
     // TODO: use vheight
     vote_decided: bool,
 }
@@ -72,17 +73,21 @@ impl Voter {
             .map(|kit| (*kit.sign_id() as usize, kit.sign()))
             .collect::<Vec<_>>();
 
-        let combined = self.pks.combine_signatures(tmp).unwrap(); 
+        let combined = self.pks.combine_signatures(tmp).unwrap();
 
         Ok(Box::new(combined))
     }
 
-    pub fn validate_vote(&self, prop: &TreeNode, vote: &SignKit) -> bool{
-        self.pks.public_key_share(vote.sign_id()).verify(vote.sign(), prop.to_be_bytes())
+    pub fn validate_vote(&self, prop: &TreeNode, vote: &SignKit) -> bool {
+        self.pks
+            .public_key_share(vote.sign_id())
+            .verify(vote.sign(), prop.to_be_bytes())
     }
 
-    pub fn validate_qc(&self, qc_node: &TreeNode, combined_sign: &CombinedSign) -> bool{
-        self.pks.public_key().verify(combined_sign, qc_node.to_be_bytes())
+    pub fn validate_qc(&self, qc_node: &TreeNode, combined_sign: &CombinedSign) -> bool {
+        self.pks
+            .public_key()
+            .verify(combined_sign, qc_node.to_be_bytes())
     }
 
     pub fn reset(&mut self, new_view: ViewNumber) {

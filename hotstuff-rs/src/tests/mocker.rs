@@ -1,22 +1,31 @@
 //! Mocker for testing.
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::{mem::MaybeUninit, unimplemented, vec};
-use std::collections::{HashMap};
-use std::sync::Arc; 
 
-use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, SignatureShare, Signature};
-use log::{debug};
-use simplelog::{CombinedLogger, WriteLogger,  LevelFilter, Config};
+use log::debug;
+use simplelog::{CombinedLogger, Config, LevelFilter, WriteLogger};
+use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, Signature, SignatureShare};
 
+use crate::{
+    msg::Context,
+    safety::{
+        basic::*,
+        machine::{Machine, Ready, Safety, SafetyErr, SafetyEvent},
+        safety_storage::{in_mem::InMemoryStorage, Snapshot},
+        voter::Voter,
+    },
+};
 
-use crate::{msg::Context, safety::{basic::*, machine::{Machine, Ready, Safety, SafetyErr, SafetyEvent}, voter::Voter}, safety_storage::in_mem::InMemoryStorage};
-
-pub(crate) fn init_logger(){
-    let _ = CombinedLogger::init(
-        vec![
-            //TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Mixed),
-            WriteLogger::new(LevelFilter::Debug, Config::default(), std::fs::File::create("./my_rust_bin.log").unwrap())
-        ]
-    );
+pub(crate) fn init_logger() {
+    let _ = CombinedLogger::init(vec![
+        //TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Mixed),
+        WriteLogger::new(
+            LevelFilter::Debug,
+            Config::default(),
+            std::fs::File::create("./my_rust_bin.log").unwrap(),
+        ),
+    ]);
 }
 
 pub(crate) fn threshold_sign_kit(
@@ -44,58 +53,57 @@ pub enum ExpectedState<'a> {
 }
 
 pub struct MockHotStuff {
-
-    testee: Option<Machine<InMemoryStorage>>, 
+    testee: Option<Machine<InMemoryStorage>>,
 
     pks: Option<PublicKeySet>,
     sk: Option<SecretKeySet>,
     sks: Vec<(usize, SecretKeyShare)>,
-    
-    tx_to_hash: HashMap<String, NodeHash>, 
 
-    nodes: HashMap<NodeHash, Arc<TreeNode>>, 
-    qcs: HashMap<QCHash, Arc<GenericQC>>, 
-    parent: NodeHash, 
-    // 
-    qc_high: Arc<GenericQC>, 
-    height: u64, 
+    tx_to_hash: HashMap<String, NodeHash>,
+
+    nodes: HashMap<NodeHash, Arc<TreeNode>>,
+    qcs: HashMap<QCHash, Arc<GenericQC>>,
+    parent: NodeHash,
+    //
+    qc_high: Arc<GenericQC>,
+    height: u64,
     th: usize,
     n: usize,
     leader_id: usize,
     testee_id: usize,
-    init_done: bool, 
+    init_done: bool,
 
-    adversial: Option<usize>, 
+    adversial: Option<usize>,
 }
 
 impl MockHotStuff {
     pub fn new(n: usize) -> Self {
-        let init_node = Arc::new(TreeNode::genesis());
-        let init_qc = Arc::new(GenericQC::genesis(0, &init_node));
-        let init_node_hash = TreeNode::hash(&init_node); 
-        // let init_qc_hash = GenericQC::hash(&init_qc); 
+        let init_node = Arc::new((*INIT_NODE).clone());
+        let init_qc = Arc::new((*INIT_QC).clone());
+        let init_node_hash = (*INIT_NODE_HASH).clone();
+        // let init_qc_hash = GenericQC::hash(&init_qc);
 
         Self {
-            testee: None, 
-            parent: init_node_hash, 
-            qc_high: init_qc, 
-            
+            testee: None,
+            parent: init_node_hash,
+            qc_high: init_qc,
+
             pks: None,
             sk: None,
             sks: Vec::new(),
-            tx_to_hash: HashMap::new(), 
+            tx_to_hash: HashMap::new(),
 
-            nodes: HashMap::new(), 
-            qcs: HashMap::new(), 
+            nodes: HashMap::new(),
+            qcs: HashMap::new(),
 
-            height: 0, 
+            height: 0,
             th: 0,
             n,
             leader_id: 0,
             testee_id: 0,
 
-            init_done: false, 
-            adversial: None, 
+            init_done: false,
+            adversial: None,
         }
     }
 
@@ -111,13 +119,13 @@ impl MockHotStuff {
         self
     }
 
-    pub fn specify_adversial(&mut self, adversial: usize) -> &mut Self{
+    pub fn specify_adversial(&mut self, adversial: usize) -> &mut Self {
         assert!(adversial < self.n);
-        self.adversial = Some(adversial); 
+        self.adversial = Some(adversial);
         self
     }
 
-    /// Initialize state. 
+    /// Initialize state.
     pub fn init(&mut self) {
         assert!(!self.init_done);
         assert!(self.n > 0);
@@ -129,31 +137,37 @@ impl MockHotStuff {
         self.pks = Some(b);
         self.sks = c;
 
-        let init_node = Arc::new(TreeNode::genesis());
-        let init_qc = Arc::new(GenericQC::genesis(0, &init_node));
-        let init_node_hash = TreeNode::hash(&init_node); 
-        let init_qc_hash = GenericQC::hash(&init_qc); 
+        let init_node = Arc::new((*INIT_NODE).clone());
+        let init_qc = Arc::new((*INIT_QC).clone());
+        let init_node_hash = (*INIT_NODE_HASH).clone();
+        let init_qc_hash = (*INIT_QC_HASH).clone();
 
-        self.tx_to_hash.insert(format!("init"), init_node_hash.clone());
+        self.tx_to_hash
+            .insert(format!("init"), init_node_hash.clone());
         self.qcs.insert(init_qc_hash.clone(), init_qc.clone());
         self.nodes.insert(init_node_hash.clone(), init_node.clone());
 
         let view = 0;
-        let mut node_pool  = HashMap::new();
-        node_pool.insert(init_node_hash.clone(), init_node.clone()); 
+        let mut node_pool = HashMap::new();
+        node_pool.insert(init_node_hash.clone(), init_node.clone());
         let mut qc_map = HashMap::new();
         qc_map.insert(init_qc_hash.clone(), init_qc.clone());
 
         self.parent = init_node_hash;
         self.qc_high = init_qc;
-        
-        let voter = Voter::new(self.testee_id, self.pks.as_ref().unwrap().clone(), self.sk.as_ref().unwrap().secret_key_share(self.testee_id));
-        let storage = InMemoryStorage::new(node_pool, qc_map, view, &init_node, self.qc_high.as_ref());
+
+        let voter = Voter::new(
+            self.testee_id,
+            self.pks.as_ref().unwrap().clone(),
+            self.sk.as_ref().unwrap().secret_key_share(self.testee_id),
+        );
+        let storage =
+            InMemoryStorage::new(node_pool, qc_map, view, &init_node, self.qc_high.as_ref());
         let testee: Machine<InMemoryStorage> = Machine::new(
             voter,
-            format!("{}", self.testee_id), 
-            self.n, 
-            Some(format!("{}", self.leader_id)), 
+            format!("{}", self.testee_id),
+            self.n,
+            Some(format!("{}", self.leader_id)),
             storage,
         );
 
@@ -162,266 +176,344 @@ impl MockHotStuff {
     }
 
     /// Construct chain for testee. Note that no qc of last proposal is formed!
-    /// For example `a1 <-qc- a2 <-qc- a3`, a1 has 2 qc, a2 has one, but qc of a3 isn't formed. 
+    /// For example `a1 <-qc- a2 <-qc- a3`, a1 has 2 qc, a2 has one, but qc of a3 isn't formed.
     pub fn recv_consecutive_proposals(&mut self, cmds: Vec<String>) -> &mut Self {
-        // It's init_qc now 
-        let mut prev_qc= self.qc_high.clone(); 
-        for cmd in cmds{
+        // It's init_qc now
+        let mut prev_qc = self.qc_high.clone();
+        for cmd in cmds {
             self.height += 1;
             // make node
-            let (node, hash) = 
-            TreeNode::node_and_hash(vec![&Txn::new(cmd.as_bytes())], self.height, &self.parent, &GenericQC::hash(self.qc_high.as_ref()));
+            let (node, hash) = TreeNode::node_and_hash(
+                vec![&Txn::new(cmd.as_bytes())],
+                self.height,
+                &self.parent,
+                self.qc_high.as_ref(),
+            );
 
-            assert!(self.send_correct_proposal(node.as_ref(), prev_qc.as_ref()).is_ok());
+            let res = self.send_correct_proposal(node.as_ref(), prev_qc.as_ref());
+            assert!(res.is_ok(), format!("{:?}", res));
 
-            // make qc with signs from replicas, 
+            // make qc with signs from replicas,
             prev_qc = self.form_qc(self.height, &node, &hash);
-    
+
             // update state
             self.update(cmd, self.height, prev_qc.clone(), node, hash);
         }
         self
     }
 
-    /// Assertion about internal state of hotstuff module. 
+    /// Assertion about internal state of hotstuff module.
     /// Panic if assertion failed.  
-    pub fn check_hotstuff_state_with(&self, expected: &ExpectedState){
-        let ss = self.testee.as_ref().unwrap().take_snapshot(); 
-        match expected{
+    pub fn check_hotstuff_state_with(&self, expected: &ExpectedState) {
+        let ss = self.testee.as_ref().unwrap().take_snapshot();
+        match expected {
             ExpectedState::LockedAt(tx) => {
                 let node_hash = self.tx_to_hash.get(tx).unwrap();
                 let node = self.nodes.get(node_hash).unwrap();
-                assert!(ss.locked_node.height == node.height, format!("{:?}", node));
-            }, 
+                assert!(
+                    ss.locked_node.height() == node.height(),
+                    format!("{:?}", node)
+                );
+            }
             ExpectedState::CommittedBeforeHeight(h) => {
-                assert!(ss.last_committed >= *h as u64, format!("{:?}", ss)); 
-            }, 
+                assert!(ss.last_committed >= *h as u64, format!("{:?}", ss));
+            }
             ExpectedState::QcHighOf(tx) => {
-                let prop_hash = self.tx_to_hash.get(tx).unwrap(); 
-                let (qc_node_hash, _) = self.nodes.get_key_value(&ss.qc_high.node).unwrap();
-                assert_eq!(qc_node_hash, prop_hash); 
-            },
+                let prop_hash = self.tx_to_hash.get(tx).unwrap();
+                let (qc_node_hash, _) = self.nodes.get_key_value(ss.qc_high.node_hash()).unwrap();
+                assert_eq!(qc_node_hash, prop_hash);
+            }
             _ => unimplemented!(),
-        }; 
+        };
     }
 
-    /// let testee extends branch from specified parent`. This method will increate height. 
-    /// Panic if parent didn't exist. 
+    /// let testee extends branch from specified parent`. This method will increate height.
+    /// Panic if parent didn't exist.
     pub fn extend_from(&mut self, parent: String, tx: String) {
         let parent_hash = self.tx_to_hash.get(&parent).unwrap().clone();
         let parent = self.nodes.get(&parent_hash).unwrap().clone();
-        // form qc of parent and use it to create new proposal. 
+        // form qc of parent and use it to create new proposal.
         let qc = self.form_qc(self.height, &parent, &parent_hash);
 
         self.tick();
         let res = self.propose(&parent_hash, tx, qc);
-        assert!(
-            if let Ok(Ready::Signature(_, _, _)) = res{
-                true
-            }else{
-                false
-            }
-        );
+        assert!(if let Ok(Ready::Signature(_, _, _)) = res {
+            true
+        } else {
+            false
+        });
     }
 
-    /// Send new proposal with corrupted qc to testee. This method will increate height. 
+    /// Send new proposal with corrupted qc to testee. This method will increate height.
     pub fn propose_with_corrupted_qc(&mut self, parent: String, tx: String) {
         let parent_hash = self.tx_to_hash.get(&parent).unwrap().clone();
 
-        // form qc of parent and use it to create new proposal. 
+        // form qc of parent and use it to create new proposal.
         let qc = self.form_corrupted_qc(self.height, &parent_hash);
 
         self.tick();
         let res = self.propose(&parent_hash, tx, qc);
 
-        assert!(
-            if let Err(SafetyErr::CorruptedQC) = res{
-                true
-            }else{
-                false
-            }
-        );
+        assert!(if let Err(SafetyErr::CorruptedQC) = res {
+            true
+        } else {
+            false
+        });
     }
 
-    /// Leader recv txs from other 
-    pub fn recv_new_view_msgs(&mut self, txs: Vec<(usize, String)>) -> &mut Self{
-        for (i, tx) in txs.iter(){
-            let node_hash = self.tx_to_hash.get(tx).unwrap(); 
+    /// Leader recv txs from other
+    pub fn recv_new_view_msgs(&mut self, txs: Vec<(usize, String)>) -> &mut Self {
+        for (i, tx) in txs.iter() {
+            let node_hash = self.tx_to_hash.get(tx).unwrap();
             debug!("{}, {:?}", tx, &node_hash);
             let node = self.nodes.get(node_hash).unwrap();
-            let qc = self.qcs.get(&node.justify).unwrap();
-            let _ = self.testee.as_mut().unwrap().process_safety_event(
-            SafetyEvent::RecvNewViewMsg(
-                    Context{
-                        from: format!("{}", i), 
-                        view: self.height, 
-                    }, 
-                    qc.clone()
-                ) 
-            ).unwrap();
+            let qc = node.justify();
+            let _ = self
+                .testee
+                .as_mut()
+                .unwrap()
+                .process_safety_event(SafetyEvent::RecvNewViewMsg(
+                    Context {
+                        from: format!("{}", i),
+                        view: self.height,
+                    },
+                    Arc::new(qc.clone()),
+                ))
+                .unwrap();
         }
         self
     }
 
-    pub fn make_proposal(&mut self, new_tx: String) -> Ready{
+    pub fn make_proposal(&mut self, new_tx: String) -> Ready {
         self.tick();
 
-        let res = self.testee
-        .as_mut()
-        .unwrap()
-        .process_safety_event(SafetyEvent::NewTx(vec![Txn::new(new_tx.clone())]))
-        .unwrap();
+        let res = self
+            .testee
+            .as_mut()
+            .unwrap()
+            .process_safety_event(SafetyEvent::NewTx(vec![Txn::new(new_tx.clone())]))
+            .unwrap();
 
         // update mocker
-        match &res{
+        match &res {
             Ready::NewProposal(_, node, prev_qc) => {
                 let hash = Box::new(TreeNode::hash(&node));
-                self.update(new_tx, self.height, prev_qc.clone(), Box::new(node.as_ref().clone()), hash);
-            }, 
+                self.update(
+                    new_tx,
+                    self.height,
+                    prev_qc.clone(),
+                    Box::new(node.as_ref().clone()),
+                    hash,
+                );
+            }
             _ => panic!(),
         }
         res
     }
 
-    pub fn check_proposal_with(&self, expected: &ExpectedState) -> &Self{
-        match expected{
+    pub fn check_proposal_with(&self, expected: &ExpectedState) -> &Self {
+        match expected {
             ExpectedState::ParentIs(parent, prop) => {
                 let parent = self.tx_to_hash.get(parent).unwrap();
-                assert_eq!(parent, &prop.parent);
-            }, 
+                assert_eq!(parent, prop.parent_hash());
+            }
             ExpectedState::QcOf(qc_node_tx, prop) => {
                 let qc_node_hash = self.tx_to_hash.get(qc_node_tx).unwrap();
-                let prop_justify_node_hash = &self.qcs.get(&prop.justify).unwrap().node;
+                let prop_justify_node_hash = prop.justify().node_hash();
                 assert_eq!(qc_node_hash, prop_justify_node_hash);
-            },
-            
-            _ => panic!("invalided expected state for this method"), 
+            }
+
+            _ => panic!("invalided expected state for this method"),
         }
         self
     }
 
-    /// Recv one corrupted new-view msg. 
-    pub fn recv_corrupted_view_msg(&mut self, qc_node: String) -> &mut Self{
+    /// Recv one corrupted new-view msg.
+    pub fn recv_corrupted_view_msg(&mut self, qc_node: String) -> &mut Self {
         let prev_qc_hash = self.tx_to_hash.get(&qc_node).unwrap();
-        let prev_qc = self.form_corrupted_qc(self.height, prev_qc_hash); 
-        let _ = self.testee.as_mut().unwrap().process_safety_event(
-            SafetyEvent::RecvNewViewMsg(
-                Context{
-                    from: format!("{}", self.adversial.unwrap()), 
-                    view: self.height, 
-                }, 
-                prev_qc, 
-            )
-        );
+        let prev_qc = self.form_corrupted_qc(self.height, prev_qc_hash);
+        let _ = self
+            .testee
+            .as_mut()
+            .unwrap()
+            .process_safety_event(SafetyEvent::RecvNewViewMsg(
+                Context {
+                    from: format!("{}", self.adversial.unwrap()),
+                    view: self.height,
+                },
+                prev_qc,
+            ));
         self
     }
 
-    pub fn recv_votes(&mut self, votes: Vec<MockEvent>) -> &mut Self{
-        for vote in votes{
-            match vote{
+    pub fn recv_votes(&mut self, votes: Vec<MockEvent>) -> &mut Self {
+        for vote in votes {
+            match vote {
                 MockEvent::AcceptedVote(from, tx) => {
-                    let node_hash = self.tx_to_hash.get(&tx).unwrap(); 
-                    let node = self.nodes.get(node_hash).unwrap(); 
-                    let sign = self.sk.as_ref().unwrap().secret_key_share(from).sign(&node.to_be_bytes());
+                    let node_hash = self.tx_to_hash.get(&tx).unwrap();
+                    let node = self.nodes.get(node_hash).unwrap();
+                    let sign = self
+                        .sk
+                        .as_ref()
+                        .unwrap()
+                        .secret_key_share(from)
+                        .sign(&node.to_be_bytes());
 
-                    let _ = self.testee.as_mut().unwrap()
-                    .on_recv_vote(&Context{
-                            from: format!("{}", from), 
-                            view: self.height, 
-                        }, 
-                        &node, 
-                        &SignKit::from((sign, from))
+                    let _ = self.testee.as_mut().unwrap().on_recv_vote(
+                        &Context {
+                            from: format!("{}", from),
+                            view: self.height,
+                        },
+                        &node,
+                        &SignKit::from((sign, from)),
                     );
-                }, 
+                }
                 MockEvent::CorruptedVote(from, tx) => {
-                    let node_hash = self.tx_to_hash.get(&tx).unwrap(); 
-                    let node = self.nodes.get(node_hash).unwrap(); 
+                    let node_hash = self.tx_to_hash.get(&tx).unwrap();
+                    let node = self.nodes.get(node_hash).unwrap();
                     let sign = self.form_corrupted_sign();
-                    let err = self.testee.as_mut().unwrap()
-                    .on_recv_vote(&Context{
-                            from: format!("{}", from), 
-                            view: self.height, 
-                        }, 
-                        &node, 
-                        &SignKit::from((sign, from))
+                    let err = self.testee.as_mut().unwrap().on_recv_vote(
+                        &Context {
+                            from: format!("{}", from),
+                            view: self.height,
+                        },
+                        &node,
+                        &SignKit::from((sign, from)),
                     );
 
                     assert!(err.is_err());
-                }, 
+                }
                 _ => panic!("invalid input"),
-            }; 
+            };
         }
         self
     }
 
-    /// Increase both testee and mocker's ticker. 
-    fn tick(&mut self){
-        self.height += 1; 
-        self.testee.as_mut().unwrap().on_view_change(format!("{}", self.leader_id), self.height).unwrap();
+    /// Increase both testee and mocker's ticker.
+    fn tick(&mut self) {
+        self.height += 1;
+        self.testee
+            .as_mut()
+            .unwrap()
+            .on_view_change(format!("{}", self.leader_id), self.height)
+            .unwrap();
     }
 
-    fn form_corrupted_sign(&self) -> Sign{
-        unsafe {
-            MaybeUninit::uninit().assume_init()
-        }
+    fn form_corrupted_sign(&self) -> Sign {
+        unsafe { MaybeUninit::uninit().assume_init() }
     }
 
-    fn propose(&mut self, parent_hash:&NodeHash, tx: String, qc: Arc<GenericQC>) -> Result<Ready, SafetyErr>{
+    fn propose(
+        &mut self,
+        parent_hash: &NodeHash,
+        tx: String,
+        qc: Arc<GenericQC>,
+    ) -> Result<Ready, SafetyErr> {
         // parent <- qc <- new_node
-
-        // form qc of parent and use it to create new proposal. 
+        // form qc of parent and use it to create new proposal.
         // let qc = self.form_qc(self.height, &parent_hash);
-        let qc_hash = Arc::new(GenericQC::hash(qc.as_ref())); 
         self.tick();
-        let (node, hash) = TreeNode::node_and_hash(vec![&Txn::new(tx.as_bytes())], self.height, parent_hash, &qc_hash);
-        let res = self.send_correct_proposal(&node, &qc); 
+        let (node, hash) = TreeNode::node_and_hash(
+            vec![&Txn::new(tx.as_bytes())],
+            self.height,
+            parent_hash,
+            &qc,
+        );
+        let res = self.send_correct_proposal(&node, &qc);
         self.update(tx, self.height, qc, node, hash);
         res
     }
 
-    fn send_correct_proposal(&mut self, node: &TreeNode, justify: &GenericQC) -> Result<Ready, SafetyErr>{
+    fn send_correct_proposal(
+        &mut self,
+        node: &TreeNode,
+        justify: &GenericQC,
+    ) -> Result<Ready, SafetyErr> {
         // send node & qc to the testee
-        self.testee.as_mut().unwrap().on_recv_proposal(&Context{
-            from: format!("mocker"), 
-            view: self.height as u64,  
-        }, node, justify)
+        self.testee.as_mut().unwrap().on_recv_proposal(
+            &Context {
+                from: format!("mocker"),
+                view: self.height as u64,
+            },
+            node,
+            justify,
+        )
     }
 
-    /// Create quorum certificate for a node. 
-    fn form_qc(&mut self, view: ViewNumber, node: &TreeNode, node_hash: &NodeHash) -> Arc<GenericQC>{
-        // make qc with signs from replicas, 
+    /// Create quorum certificate for a node.
+    fn form_qc(
+        &mut self,
+        view: ViewNumber,
+        node: &TreeNode,
+        node_hash: &NodeHash,
+    ) -> Arc<GenericQC> {
+        // make qc with signs from replicas,
         let node_bytes = node.to_be_bytes();
-        let signs = self.sks
+        let signs = self
+            .sks
             .iter()
             .map(|(i, sk)| (*i, sk.sign(&node_bytes)))
             .collect::<Vec<(usize, SignatureShare)>>();
-        let combined_sign = self.pks.as_ref().unwrap()
-        .combine_signatures(signs.iter().map(|(i, s)| (*i, s)))
-        .unwrap();
+        let combined_sign = self
+            .pks
+            .as_ref()
+            .unwrap()
+            .combine_signatures(signs.iter().map(|(i, s)| (*i, s)))
+            .unwrap();
 
         Arc::new(GenericQC::new(view, node_hash, &combined_sign))
     }
 
-    fn form_corrupted_qc(&self, view: ViewNumber, node_hash: &NodeHash) -> Arc<GenericQC>{
-        let combined_sign: Signature = unsafe{
-            MaybeUninit::uninit().assume_init()
-        };
+    fn form_corrupted_qc(&self, view: ViewNumber, node_hash: &NodeHash) -> Arc<GenericQC> {
+        let combined_sign: Signature = unsafe { MaybeUninit::uninit().assume_init() };
 
         Arc::new(GenericQC::new(view, node_hash, &combined_sign))
     }
 
-    fn update(&mut self, cmd: String, view: ViewNumber, prev_qc:Arc<GenericQC>, node: Box<TreeNode>, hash: Box<NodeHash>){
+    fn update(
+        &mut self,
+        cmd: String,
+        view: ViewNumber,
+        prev_qc: Arc<GenericQC>,
+        node: Box<TreeNode>,
+        hash: Box<NodeHash>,
+    ) {
         self.tx_to_hash.insert(cmd, hash.as_ref().clone());
-        self.height = u64::max(self.height, view); 
+        self.height = u64::max(self.height, view);
         self.parent = *hash;
         self.qc_high = prev_qc.clone();
-        self.nodes.insert(TreeNode::hash(node.as_ref()), Arc::new(*node));
-        self.qcs.insert(GenericQC::hash(prev_qc.as_ref()), self.qc_high.clone());
+        self.nodes
+            .insert(TreeNode::hash(node.as_ref()), Arc::new(*node));
+        self.qcs
+            .insert(GenericQC::hash(prev_qc.as_ref()), self.qc_high.clone());
+    }
+
+    fn take_snapshot(&mut self) -> Snapshot {
+        if let Ready::InternalState(_, ss) = self
+            .testee
+            .as_mut()
+            .unwrap()
+            .process_safety_event(SafetyEvent::RequestSnapshot)
+            .unwrap()
+        {
+            ss
+        } else {
+            panic!()
+        }
+    }
+
+    pub fn status(&mut self) {
+        let ss = self.take_snapshot();
+        for (k, v) in &self.tx_to_hash {
+            println!("{:?}-{:?}", k, v);
+        }
+
+        println!("{:?}\n\n", ss);
     }
 }
 
-pub enum MockEvent{
+pub enum MockEvent {
     // from, tx
-    CorruptedVote(usize, String), 
-    AcceptedVote(usize, String), 
+    CorruptedVote(usize, String),
+    AcceptedVote(usize, String),
 }
