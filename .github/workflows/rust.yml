@@ -1,10 +1,11 @@
-name: Rust
+# run cargo test & build in hostuff-rs/ at branch dev.
+name: hotstuff-rs-cargo
 
 on:
   push:
-    branches: [ master ]
+    branches: [ dev ]
   pull_request:
-    branches: [ master ]
+    branches: [ dev ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -13,8 +14,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@dev
+#    - uses: actions/checkout@dev
+    - uses: actions/checkout@v1
     - name: Build
+      working-directory: ./hotstuff-rs
       run: cargo build --verbose
     - name: Run tests
+      working-directory: ./hotstuff-rs
       run: cargo test --verbose
