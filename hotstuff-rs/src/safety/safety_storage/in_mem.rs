@@ -3,8 +3,9 @@ use std::{collections::HashMap, sync::Arc};
 use log::{debug, info};
 
 use super::SafetyStorage;
+use crate::data::*;
 use crate::msg::*;
-use crate::safety::basic::*;
+
 pub struct InMemoryStorage {
     // storage related
     node_pool: HashMap<NodeHash, Arc<TreeNode>>,

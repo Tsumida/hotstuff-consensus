@@ -1,6 +1,6 @@
 pub mod in_mem;
 
-use crate::safety::basic::*;
+use crate::data::*;
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

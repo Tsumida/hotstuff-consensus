@@ -1,7 +1,8 @@
 //! Demo
+mod crypto;
+mod data;
 mod msg;
 mod safety;
-mod traits;
-
 #[cfg(test)]
 mod tests;
+mod traits;

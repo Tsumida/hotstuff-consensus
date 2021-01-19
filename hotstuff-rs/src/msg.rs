@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::safety::basic::{GenericQC, ReplicaID, TreeNode, ViewNumber};
+use crate::data::{GenericQC, ReplicaID, TreeNode, ViewNumber};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Context {

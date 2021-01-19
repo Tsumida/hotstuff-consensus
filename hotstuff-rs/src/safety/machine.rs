@@ -3,13 +3,8 @@ use std::sync::Arc;
 use log::{debug, error, info};
 use thiserror::Error;
 
-use super::{
-    basic::*,
-    safety_storage::Snapshot,
-    voter::{VoteErr, Voter},
-};
-use crate::msg::Context;
-use crate::msg::*;
+use super::{safety_storage::Snapshot, voter::VoteErr, voter::Voter};
+use crate::{data::*, msg::Context};
 
 use super::safety_storage::SafetyStorage;
 

@@ -1,7 +1,5 @@
+use crate::data::{CombinedSign, ReplicaID, Sign, SignID, SignKit, TreeNode, ViewNumber, PK, SK};
 use crate::msg::Context;
-use crate::safety::basic::{
-    CombinedSign, ReplicaID, Sign, SignID, SignKit, TreeNode, ViewNumber, PK, SK,
-};
 use std::collections::HashMap;
 use thiserror::Error;
 

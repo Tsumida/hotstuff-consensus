@@ -8,9 +8,9 @@ use simplelog::{CombinedLogger, Config, LevelFilter, WriteLogger};
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, Signature, SignatureShare};
 
 use crate::{
+    data::*,
     msg::Context,
     safety::{
-        basic::*,
         machine::{Machine, Ready, Safety, SafetyErr, SafetyEvent},
         safety_storage::{in_mem::InMemoryStorage, Snapshot},
         voter::Voter,
