@@ -4,7 +4,7 @@ use log::{debug, error, info};
 use thiserror::Error;
 
 use super::{safety_storage::Snapshot, voter::VoteErr, voter::Voter};
-use crate::{data::*, msg::Context};
+use crate::{crypto::DefaultSignaturer, data::*, msg::Context};
 
 use super::safety_storage::SafetyStorage;
 
@@ -111,7 +111,7 @@ pub enum SafetyErr {
 pub struct Machine<S: SafetyStorage> {
     // view: ViewNumber,
     storage: S,
-    voter: Voter,
+    voter: Voter<DefaultSignaturer>,
 
     // config related
     total: usize,
@@ -168,16 +168,15 @@ impl<S: SafetyStorage> Safety for Machine<S> {
 
     // Make new proposal. Note that leader will sign it first.
     fn on_beat(&mut self, cmds: Vec<Txn>) -> Result<Ready> {
-        let proposal = self.make_leaf(&cmds);
-        self.storage.update_leaf(&proposal);
+        let prop = self.make_leaf(&cmds);
+        self.storage.update_leaf(&prop);
         let justify = self.storage.get_qc_high();
         let ctx = self.get_context();
 
-        let sign = self.voter.sign(&proposal);
-        let sign_kit = SignKit::from((*sign, self.voter.sign_id()));
+        let sign_kit = self.voter.sign(&prop);
         self.voter.add_vote(&ctx, &sign_kit).unwrap();
 
-        Ok(Ready::NewProposal(ctx, Arc::new(*proposal), justify))
+        Ok(Ready::NewProposal(ctx, Arc::new(*prop), justify))
     }
 
     // TODO: add validating.
@@ -246,7 +245,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 self.storage.append_new_node(&prop);
                 self.storage.update_vheight(prop.height());
                 // sign
-                let kit = SignKit::from((*self.voter.sign(prop), self.voter.sign_id()));
+                let sign_kit = self.voter.sign(&prop);
 
                 ready = Ready::Signature(
                     Context {
@@ -254,7 +253,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                         from: self.self_id.clone(),
                     },
                     Arc::new(prop.clone()),
-                    Box::new(kit),
+                    Box::new(sign_kit),
                 );
             }
         };
@@ -355,7 +354,7 @@ impl<S: SafetyStorage> Machine<S> {
     }
 
     pub fn new(
-        voter: Voter,
+        voter: Voter<DefaultSignaturer>,
         self_id: String,
         total: usize,
         leader_id: Option<String>,

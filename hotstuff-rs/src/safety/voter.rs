@@ -1,5 +1,8 @@
-use crate::data::{CombinedSign, ReplicaID, Sign, SignID, SignKit, TreeNode, ViewNumber, PK, SK};
 use crate::msg::Context;
+use crate::{
+    crypto::{SignErr, Signaturer},
+    data::{CombinedSign, ReplicaID, SignKit, TreeNode, ViewNumber},
+};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -20,72 +23,57 @@ pub enum VoteErr {
     InsufficientSigns(usize, usize),
 }
 
-pub struct Voter {
+pub struct Voter<S: Signaturer> {
     // crypto related
     view: ViewNumber,
-    sign_id: SignID,
-    pks: PK,
-    sks: SK,
+
+    // signaturer related
+    signature: S,
+
+    threshold: usize,
+
     voting_set: HashMap<ReplicaID, SignKit>,
 
     // TODO: use vheight
     vote_decided: bool,
 }
 
-impl Voter {
-    pub fn new(sign_id: SignID, pks: PK, sks: SK) -> Self {
+impl<S: Signaturer> Voter<S> {
+    pub fn new(threshold: usize, signature: S) -> Self {
         Self {
             view: 0,
-            sign_id,
-            pks,
-            sks,
+            // TODO:
+            signature,
+            threshold,
             voting_set: HashMap::new(),
             vote_decided: false,
         }
     }
 
-    pub fn sign_id(&self) -> SignID {
-        self.sign_id
-    }
-
-    pub fn sign(&self, node: &TreeNode) -> Box<Sign> {
-        let buf = node.to_be_bytes();
-        let s = self.sks.sign(&buf);
-
-        Box::new(s)
+    pub fn sign(&self, node: &TreeNode) -> SignKit {
+        self.signature.sign(node)
     }
 
     pub fn combine_partial_sign(&mut self) -> Result<Box<CombinedSign>, VoteErr> {
-        if self.vote_set_size() <= self.pks.threshold() {
+        if self.vote_set_size() <= self.threshold {
             return Err(VoteErr::InsufficientSigns(
-                self.pks.threshold() + 1,
+                self.threshold + 1,
                 self.vote_set_size(),
             ));
         }
         self.decide();
 
-        // wrapper
-        let tmp = self
-            .voting_set
-            .values()
-            .map(|kit| (*kit.sign_id() as usize, kit.sign()))
-            .collect::<Vec<_>>();
-
-        let combined = self.pks.combine_signatures(tmp).unwrap();
-
-        Ok(Box::new(combined))
+        self.signature
+            .combine_partial_sign(self.voting_set.values())
+            .map_err(|SignErr::InsufficientSigns(n, m)| VoteErr::InsufficientSigns(n, m))
     }
 
     pub fn validate_vote(&self, prop: &TreeNode, vote: &SignKit) -> bool {
-        self.pks
-            .public_key_share(vote.sign_id())
-            .verify(vote.sign(), prop.to_be_bytes())
+        self.signature.validate_vote(prop, vote)
     }
 
     pub fn validate_qc(&self, qc_node: &TreeNode, combined_sign: &CombinedSign) -> bool {
-        self.pks
-            .public_key()
-            .verify(combined_sign, qc_node.to_be_bytes())
+        self.signature.validate_qc(qc_node, combined_sign)
     }
 
     pub fn reset(&mut self, new_view: ViewNumber) {

@@ -1,4 +1,4 @@
-use super::{qc::QCHash, txn::Txn, GenericQC, ViewNumber};
+use super::{txn::Txn, GenericQC, ViewNumber};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 

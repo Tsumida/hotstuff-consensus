@@ -8,15 +8,15 @@ use simplelog::{CombinedLogger, Config, LevelFilter, WriteLogger};
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, Signature, SignatureShare};
 
 use crate::{
+    crypto::DefaultSignaturer,
     data::*,
     msg::Context,
     safety::{
         machine::{Machine, Ready, Safety, SafetyErr, SafetyEvent},
-        safety_storage::{in_mem::InMemoryStorage, Snapshot},
+        safety_storage::in_mem::InMemoryStorage,
         voter::Voter,
     },
 };
-
 pub(crate) fn init_logger() {
     let _ = CombinedLogger::init(vec![
         //TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Mixed),
@@ -78,10 +78,8 @@ pub struct MockHotStuff {
 
 impl MockHotStuff {
     pub fn new(n: usize) -> Self {
-        let init_node = Arc::new((*INIT_NODE).clone());
         let init_qc = Arc::new((*INIT_QC).clone());
         let init_node_hash = (*INIT_NODE_HASH).clone();
-        // let init_qc_hash = GenericQC::hash(&init_qc);
 
         Self {
             testee: None,
@@ -157,9 +155,12 @@ impl MockHotStuff {
         self.qc_high = init_qc;
 
         let voter = Voter::new(
-            self.testee_id,
-            self.pks.as_ref().unwrap().clone(),
-            self.sk.as_ref().unwrap().secret_key_share(self.testee_id),
+            self.th,
+            DefaultSignaturer::new(
+                self.testee_id,
+                self.pks.as_ref().unwrap().clone(),
+                self.sk.as_ref().unwrap().secret_key_share(self.testee_id),
+            ),
         );
         let storage =
             InMemoryStorage::new(node_pool, qc_map, view, &init_node, self.qc_high.as_ref());
@@ -383,7 +384,6 @@ impl MockHotStuff {
 
                     assert!(err.is_err());
                 }
-                _ => panic!("invalid input"),
             };
         }
         self
@@ -486,29 +486,6 @@ impl MockHotStuff {
             .insert(TreeNode::hash(node.as_ref()), Arc::new(*node));
         self.qcs
             .insert(GenericQC::hash(prev_qc.as_ref()), self.qc_high.clone());
-    }
-
-    fn take_snapshot(&mut self) -> Snapshot {
-        if let Ready::InternalState(_, ss) = self
-            .testee
-            .as_mut()
-            .unwrap()
-            .process_safety_event(SafetyEvent::RequestSnapshot)
-            .unwrap()
-        {
-            ss
-        } else {
-            panic!()
-        }
-    }
-
-    pub fn status(&mut self) {
-        let ss = self.take_snapshot();
-        for (k, v) in &self.tx_to_hash {
-            println!("{:?}-{:?}", k, v);
-        }
-
-        println!("{:?}\n\n", ss);
     }
 }
 

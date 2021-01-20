@@ -4,12 +4,10 @@ use log::{debug, info};
 
 use super::SafetyStorage;
 use crate::data::*;
-use crate::msg::*;
 
 pub struct InMemoryStorage {
     // storage related
     node_pool: HashMap<NodeHash, Arc<TreeNode>>,
-    qc_map: HashMap<QCHash, Arc<GenericQC>>,
 
     // safety related
     leaf: Arc<TreeNode>,
@@ -26,16 +24,16 @@ pub struct InMemoryStorage {
 }
 
 impl InMemoryStorage {
+    // TODO: remove qcs
     pub fn new(
         node_pool: HashMap<NodeHash, Arc<TreeNode>>,
-        qc_map: HashMap<QCHash, Arc<GenericQC>>,
+        _: HashMap<QCHash, Arc<GenericQC>>,
         view: ViewNumber,
         init_node: &TreeNode,
         init_qc: &GenericQC,
     ) -> Self {
         Self {
             node_pool,
-            qc_map,
             view,
             vheight: view,
             commit_height: 0,

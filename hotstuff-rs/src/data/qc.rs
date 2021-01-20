@@ -74,9 +74,3 @@ impl std::convert::AsRef<[u8]> for QCHash {
         return &self.0;
     }
 }
-
-impl QCHash {
-    fn genesis() -> QCHash {
-        QCHash([0; 32])
-    }
-}

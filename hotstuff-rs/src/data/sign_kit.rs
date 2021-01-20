@@ -8,6 +8,11 @@ pub struct SignKit {
 }
 
 impl SignKit {
+    #[inline(always)]
+    pub fn new(sign_id: usize, sign: Sign) -> Self {
+        Self { sign_id, sign }
+    }
+
     #[inline]
     pub fn sign(&self) -> &Sign {
         &self.sign
