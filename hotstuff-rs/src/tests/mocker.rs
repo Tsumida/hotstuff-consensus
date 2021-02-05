@@ -297,12 +297,12 @@ impl MockHotStuff {
 
         // update mocker
         match &res {
-            Ready::NewProposal(_, node, prev_qc) => {
+            Ready::NewProposal(_, node) => {
                 let hash = Box::new(TreeNode::hash(&node));
                 self.update(
                     new_tx,
                     self.height,
-                    prev_qc.clone(),
+                    Arc::new(node.justify().clone()),
                     Box::new(node.as_ref().clone()),
                     hash,
                 );

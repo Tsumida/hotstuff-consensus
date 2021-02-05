@@ -16,7 +16,7 @@ pub enum SafetyEvent {
     RequestSnapshot,
 
     // As replica, recv proposal from leader.  -> on_recv_proposal
-    RecvProposal(Context, Arc<TreeNode>, Arc<GenericQC>),
+    RecvProposal(Context, Arc<TreeNode>),
 
     // As leader, recv sign(ACK) from other replicas.
     RecvSign(Context, Arc<TreeNode>, Arc<SignKit>),
@@ -46,9 +46,9 @@ pub enum Ready {
     //
     InternalState(Context, Snapshot),
     // Form new proposal.
-    NewProposal(Context, Arc<TreeNode>, Arc<GenericQC>),
+    NewProposal(Context, Arc<TreeNode>),
     //
-    UpdateQCHigh(Context, Arc<TreeNode>, Arc<GenericQC>),
+    UpdateQCHigh(Context, Arc<TreeNode>),
     // Signature for the proposal
     Signature(Context, Arc<TreeNode>, Box<SignKit>),
     // TODO: remove
@@ -176,7 +176,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         let sign_kit = self.voter.sign(&prop);
         self.voter.add_vote(&ctx, &sign_kit).unwrap();
 
-        Ok(Ready::NewProposal(ctx, Arc::new(*prop), justify))
+        Ok(Ready::NewProposal(ctx, Arc::new(*prop)))
     }
 
     // TODO: add validating.
@@ -267,11 +267,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
             self.voter.reset(view);
             self.storage.increase_view(view);
             debug!("view change {}", self.storage.get_view());
-            Ready::UpdateQCHigh(
-                self.get_context(),
-                self.storage.get_leaf(),
-                self.storage.get_qc_high(),
-            )
+            Ready::UpdateQCHigh(self.get_context(), self.storage.get_leaf())
         } else {
             Ready::Nil
         };
@@ -292,8 +288,8 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 let ss = self.take_snapshot();
                 Ok(Ready::InternalState(self.get_context(), ss))
             }
-            SafetyEvent::RecvProposal(ctx, proposal, justify) => {
-                self.on_recv_proposal(&ctx, proposal.as_ref(), justify.as_ref())
+            SafetyEvent::RecvProposal(ctx, proposal) => {
+                self.on_recv_proposal(&ctx, proposal.as_ref(), proposal.as_ref().justify())
             }
             SafetyEvent::RecvSign(ctx, node, sign) => {
                 self.on_recv_vote(&ctx, node.as_ref(), sign.as_ref())
@@ -304,11 +300,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 let qc_node = self.storage.get_node(qc_high.node_hash()).unwrap();
                 self.storage
                     .update_qc_high(qc_node.as_ref(), qc_high.as_ref());
-                Ok(Ready::UpdateQCHigh(
-                    self.get_context(),
-                    qc_node,
-                    self.storage.get_qc_high(),
-                ))
+                Ok(Ready::UpdateQCHigh(self.get_context(), qc_node))
             }
             // TODO: remove
             SafetyEvent::NewLeader(ctx, leader) => {

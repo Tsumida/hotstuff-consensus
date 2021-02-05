@@ -147,7 +147,7 @@ fn test_new_proposal() {
         .make_proposal(format!("a6"));
 
     // leader's qc_high is qc of a4 => new proposal is based on q4
-    if let Ready::NewProposal(_, prop, _) = output {
+    if let Ready::NewProposal(_, prop, ..) = output {
         mhs.check_proposal_with(&ExpectedState::QcOf(format!("a4"), &prop))
             .check_proposal_with(&ExpectedState::ParentIs(format!("a4"), &prop));
     } else {
@@ -191,7 +191,7 @@ fn test_corrupted_new_view_msg() {
         .make_proposal(format!("a5"));
 
     match output {
-        Ready::NewProposal(_, prop, _) => {
+        Ready::NewProposal(_, prop, ..) => {
             mhs.check_proposal_with(&ExpectedState::QcOf(format!("a3"), &prop))
                 .check_proposal_with(&ExpectedState::ParentIs(format!("a3"), &prop));
         }
