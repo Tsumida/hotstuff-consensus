@@ -19,7 +19,7 @@ pub enum SafetyEvent {
     RecvProposal(Context, Arc<TreeNode>),
 
     // As leader, recv sign(ACK) from other replicas.
-    RecvSign(Context, Arc<TreeNode>, Arc<SignKit>),
+    RecvSign(Context, Arc<TreeNode>, Box<SignKit>),
 
     RecvNewViewMsg(Context, Arc<GenericQC>),
 

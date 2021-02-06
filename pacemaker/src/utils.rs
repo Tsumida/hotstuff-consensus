@@ -8,7 +8,7 @@ use std::time::Duration;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[inline(always)]
-pub(crate) fn view_hash(view: ViewNumber, total: usize) -> usize {
+pub fn view_hash(view: ViewNumber, total: usize) -> usize {
     let mut h = fnv::FnvHasher::default();
     h.write_u64(view);
     h.finish() as usize % total

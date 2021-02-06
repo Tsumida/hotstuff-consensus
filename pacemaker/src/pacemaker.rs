@@ -1,8 +1,7 @@
-use std::{io, ops::Sub, unimplemented};
+use std::{io, sync::Arc, unimplemented};
 
-use crate::{data::PeerEvent, timer::DefaultTimer};
-// use hotstuff_rs;
 use crate::liveness_storage::LivenessStorage;
+use crate::{data::PeerEvent, timer::DefaultTimer};
 use hotstuff_rs::{
     data::{ReplicaID, ViewNumber},
     safety::{
@@ -18,11 +17,15 @@ pub type TchanR<T> = tokio::sync::mpsc::Receiver<T>;
 pub type TchanS<T> = tokio::sync::mpsc::Sender<T>;
 pub type PeerEventRecvr = TchanR<PeerEvent>;
 pub type PeerEventSender = TchanS<PeerEvent>;
+pub type CtlRecvr = tokio::sync::broadcast::Receiver<()>;
+pub type CtlSender = tokio::sync::broadcast::Sender<()>;
 
 pub struct Pacemaker {
     // pacemaker identifier
     view: ViewNumber,
     id: ReplicaID,
+
+    // todo: consider use trait object
     elector: crate::elector::RoundRobinLeaderElector,
     storage: Box<dyn LivenessStorage + Send + Sync>,
 
@@ -56,7 +59,7 @@ impl Pacemaker {
                 },
                 Some(view) = self.timeout_ch.recv() => {
                     if view >= self.view{
-                        self.timer.stop_all_prev_timer();
+                        self.timer.stop_all_timer();
                         self.goto_new_view(view);
                         self.timer.start(self.view, self.timer.timeout_by_delay());
                     }
@@ -74,16 +77,19 @@ impl Pacemaker {
     async fn process_network_event(&mut self, net_event: PeerEvent) -> io::Result<()> {
         match net_event {
             PeerEvent::NewProposal { ctx, prop } => {
-                self.emit_safety_event(SafetyEvent::RecvProposal(ctx, prop))
+                self.emit_safety_event(SafetyEvent::RecvProposal(ctx, Arc::new(*prop)))
                     .await?;
             }
             PeerEvent::AcceptProposal { ctx, prop, sign } => {
                 if let Some(sign) = sign {
-                    self.emit_safety_event(SafetyEvent::RecvSign(ctx, prop, sign))
+                    self.emit_safety_event(SafetyEvent::RecvSign(ctx, Arc::new(*prop), sign))
                         .await?;
                 }
             }
-            PeerEvent::Timeout { ctx, tc } => unimplemented!(),
+            PeerEvent::Timeout { ctx, tc } => {
+                info!("recv timeout msg view={} from {}", ctx.view, &ctx.from);
+                let _ = self.storage.append_tc(&tc);
+            }
             PeerEvent::BranchSyncRequest { ctx, strategy } => unimplemented!(),
             PeerEvent::BranchSyncResponse { ctx, branch } => unimplemented!(),
         }
@@ -96,13 +102,23 @@ impl Pacemaker {
             machine::Ready::Nil => {}
             machine::Ready::InternalState(_, _) => {}
             machine::Ready::NewProposal(ctx, prop) => {
-                self.emit_peer_event(PeerEvent::NewProposal { ctx, prop })
-                    .await?;
+                self.emit_peer_event(PeerEvent::NewProposal {
+                    ctx,
+                    prop: Box::new(prop.as_ref().clone()),
+                })
+                .await?;
             }
             machine::Ready::UpdateQCHigh(_, node) => {
                 self.storage.update_qc_high(node.justify());
             }
-            machine::Ready::Signature(_, _, _) => {}
+            machine::Ready::Signature(ctx, prop, sign) => {
+                self.emit_peer_event(PeerEvent::AcceptProposal {
+                    ctx,
+                    prop: Box::new(prop.as_ref().clone()),
+                    sign: Some(sign),
+                })
+                .await?;
+            }
             machine::Ready::CommitState(_, _) => {}
         }
         Ok(())
@@ -157,8 +173,6 @@ impl AsyncMachineAdaptor {
 
 /// Async wrapper for `Machine`.
 pub struct AsyncMachineWrapper {
-    quit_ch: TchanR<()>,
-
     // buffer.
     safety_in: TchanR<machine::SafetyEvent>,
     ready_out: TchanS<machine::Ready>,
@@ -166,12 +180,15 @@ pub struct AsyncMachineWrapper {
 }
 
 impl AsyncMachineWrapper {
-    pub async fn run(&mut self) -> io::Result<()> {
+    pub async fn run(
+        &mut self,
+        mut quit_ch: tokio::sync::broadcast::Receiver<()>,
+    ) -> io::Result<()> {
         info!("machine up");
         let mut quit = false;
         while !quit {
             tokio::select! {
-                Some(()) = self.quit_ch.recv() => {
+                _ = quit_ch.recv() => {
                     quit = true;
                 },
                 Some(se) = self.safety_in.recv() => {

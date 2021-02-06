@@ -15,9 +15,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v1
-#    - name: Build
-#      working-directory: ./hotstuff-rs
-#      run: cargo build 
+    - name: Build
+      working-directory: ./hotstuff-rs
+      run: cargo build 
     - name: Run hotstuff tests
       working-directory: ./hotstuff-rs
       run: cargo test 

@@ -47,16 +47,17 @@ impl TimeoutCertificate {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerEvent {
     // Proposal from leader. May be stale.
     NewProposal {
         ctx: Context,
-        prop: Arc<TreeNode>,
+        prop: Box<TreeNode>,
     },
     AcceptProposal {
         ctx: Context,
-        prop: Arc<TreeNode>,
-        sign: Option<Arc<SignKit>>,
+        prop: Box<TreeNode>,
+        sign: Option<Box<SignKit>>,
     },
     // Timeout message from other replica.
     Timeout {
@@ -73,6 +74,15 @@ pub enum PeerEvent {
     },
 }
 
+impl PeerEvent {
+    // todo
+    pub fn to_be_bytes(&self) -> Vec<u8> {
+        let mut v = Vec::new();
+
+        v
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BranchSyncStrategy {
     // Query some specified proposal.
     Specified { hashes: Vec<NodeHash> },

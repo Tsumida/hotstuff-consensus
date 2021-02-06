@@ -3,6 +3,10 @@ use super::pacemaker::TchanS;
 use futures_timer::Delay;
 use hotstuff_rs::data::ViewNumber;
 use log::error;
+use std::sync::{
+    atomic::{AtomicU32, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 /// Cancellable timer.
@@ -13,6 +17,7 @@ pub(crate) struct DefaultTimer {
     stop_ch: tokio::sync::broadcast::Sender<()>,
     // bcast_recvr: tokio::sync::broadcast::Receiver<()>,
     notifier: TchanS<ViewNumber>,
+    cnt: Arc<AtomicU32>,
 }
 
 impl DefaultTimer {
@@ -35,32 +40,63 @@ impl DefaultTimer {
             rtt,
             stop_ch,
             notifier,
+            cnt: Arc::new(AtomicU32::new(0)),
         }
     }
 
-    /// Cancel all timers and start new one.
+    /// Start new timer.
     pub(crate) fn start(&self, view: ViewNumber, dur: Duration) {
         let mut end_ch = self.stop_ch.subscribe();
         let s = self.notifier.clone();
+        let cnt = self.cnt.clone();
         tokio::spawn(async move {
+            cnt.fetch_add(1, Ordering::SeqCst);
             tokio::select! {
                 () = Delay::new(dur) => {
                     s.send(view).await.unwrap();
                 },
                 _ = end_ch.recv() => {},
             };
+            cnt.fetch_sub(1, Ordering::SeqCst);
         });
     }
 
-    pub(crate) fn stop_all_prev_timer(&self) {
+    pub(crate) fn stop_all_timer(&self) {
         if let Err(e) = self.stop_ch.send(()) {
             error!("{}", e.to_string());
         }
+    }
+
+    fn num_running_timer(&self) -> u32 {
+        self.cnt.load(Ordering::SeqCst)
     }
 }
 
 impl Drop for DefaultTimer {
     fn drop(&mut self) {
-        self.stop_all_prev_timer();
+        self.stop_all_timer();
     }
+}
+
+#[test]
+#[ignore = "tested"]
+fn test_close_all_tiemr() {
+    let (notifier, _) = tokio::sync::mpsc::channel(1);
+    let max_timeout = 30_000;
+    let rtt = 5_000;
+    let t = DefaultTimer::new(notifier, max_timeout, rtt);
+
+    let num = tokio::runtime::Runtime::new()
+        .unwrap()
+        .block_on(async move {
+            t.start(0, t.timeout_by_delay());
+            t.start(1, t.timeout_by_delay());
+
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            t.stop_all_timer();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            t.num_running_timer()
+        });
+
+    assert_eq!(num, 0);
 }
