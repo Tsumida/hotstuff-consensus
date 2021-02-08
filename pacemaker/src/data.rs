@@ -49,6 +49,10 @@ impl TimeoutCertificate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PeerEvent {
+    Ping {
+        ctx: Context,
+        cont: String,
+    },
     // Proposal from leader. May be stale.
     NewProposal {
         ctx: Context,

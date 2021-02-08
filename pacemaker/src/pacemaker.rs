@@ -92,6 +92,7 @@ impl Pacemaker {
             }
             PeerEvent::BranchSyncRequest { ctx, strategy } => unimplemented!(),
             PeerEvent::BranchSyncResponse { ctx, branch } => unimplemented!(),
+            _ => {}
         }
         Ok(())
     }
