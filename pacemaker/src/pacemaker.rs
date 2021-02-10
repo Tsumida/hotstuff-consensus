@@ -1,7 +1,7 @@
 use std::{io, sync::Arc, unimplemented};
 
-use crate::liveness_storage::LivenessStorage;
 use crate::{data::PeerEvent, timer::DefaultTimer};
+use crate::{liveness_storage::LivenessStorage, network::NetworkAdaptor};
 use hotstuff_rs::{
     data::{ReplicaID, ViewNumber},
     safety::{
@@ -33,8 +33,7 @@ pub struct Pacemaker {
 
     machine_adaptor: AsyncMachineAdaptor,
 
-    net_sender: PeerEventSender,
-    net_recvr: PeerEventRecvr,
+    net_adaptor: NetworkAdaptor,
 
     timer: DefaultTimer,
     timeout_ch: TchanR<ViewNumber>,
@@ -54,7 +53,7 @@ impl Pacemaker {
                 Some(ready) = self.machine_adaptor.ready().recv() => {
                     self.process_ready_event(ready).await?;
                 },
-                Some(net_event) = self.net_recvr.recv() => {
+                Some(net_event) = self.net_adaptor.event_recvr.recv() => {
                     self.process_network_event(net_event).await?;
                 },
                 Some(view) = self.timeout_ch.recv() => {
@@ -134,7 +133,7 @@ impl Pacemaker {
     // todo: consider use Pacemaker Error
     async fn emit_peer_event(&mut self, pe: PeerEvent) -> io::Result<()> {
         let dur = self.timer.timeout_by_delay();
-        if let Err(e) = self.net_sender.send_timeout(pe, dur).await {
+        if let Err(e) = self.net_adaptor.event_sender.send_timeout(pe, dur).await {
             error!("pacemaker -> network adaptor block and timeout");
         }
 

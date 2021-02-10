@@ -1,172 +1,84 @@
-use crate::pacemaker::{CtlRecvr, CtlSender, PeerEventRecvr, PeerEventSender};
-use gossipsub::{GossipsubConfig, IdentTopic, MessageAuthenticity};
-use identity::Keypair;
-use libp2p::{
-    build_development_transport, gossipsub, identity,
-    kad::{store::MemoryStore, Kademlia, KademliaEvent},
-    swarm::{self, NetworkBehaviour},
-    PeerId,
+use std::{collections::HashMap, io, net::SocketAddr};
+
+use crate::{
+    data::PeerEvent,
+    pacemaker::{CtlSender, PeerEventRecvr, PeerEventSender},
 };
-use libp2p::{
-    gossipsub::{Gossipsub, GossipsubEvent},
-    swarm::NetworkBehaviourEventProcess,
-    Multiaddr, NetworkBehaviour,
-};
+use hotstuff_rs::data::ReplicaID;
 use log::{error, info};
-use std::time::Duration;
+use tokio::{io::AsyncReadExt, net::TcpSocket};
+
+pub enum NetworkMode {
+    // NetworkAdaptor connects to other peers directly using TCP.
+    Direct(HashMap<ReplicaID, SocketAddr>),
+    // NetworkAdaptor forwards events to a tcp proxy who knows how to diliver them.
+    TcpProxy(SocketAddr),
+
+    // http proxy
+    HttpProxy,
+}
+
 pub struct NetworkAdaptor {
+    // events to other peers.
     pub event_sender: PeerEventSender,
+    // from other peers.
     pub event_recvr: PeerEventRecvr,
-    pub stop_sender: CtlSender,
-
-    pub peer_id: PeerId,
+    pub mode: NetworkMode,
+    ctrl_ch: CtlSender,
+    self_addr: SocketAddr,
+    // Maxium Byte for each PeerEvent.
+    max_transport_limit: usize,
 }
 
-#[derive(NetworkBehaviour)]
-pub struct NetworkWrapper {
-    // Events from local pacemaker were sent to other peer
-    #[behaviour(ignore)]
-    net_recvr: Option<PeerEventRecvr>,
-    // Event from other peer
-    #[behaviour(ignore)]
-    net_sender: PeerEventSender,
+impl NetworkAdaptor {
+    // todo
+    async fn connect_tcp_proxy(&self) -> io::Result<()> {
+        let proxy_addr = if let NetworkMode::TcpProxy(addr) = self.mode {
+            addr
+        } else {
+            panic!();
+        };
 
-    #[behaviour(ignore)]
-    stop_recvr: Option<CtlRecvr>,
+        // tcp connection
+        let sk = TcpSocket::new_v4()?;
+        sk.bind(self.self_addr)?;
+        let mut stream = sk.connect(proxy_addr).await?;
+        info!("forwarding task starts");
 
-    #[behaviour(ignore)]
-    local_key: Keypair,
-
-    #[behaviour(ignore)]
-    peer_id: PeerId,
-
-    #[behaviour(ignore)]
-    topic: IdentTopic,
-
-    gossip: Gossipsub,
-    kad: Kademlia<MemoryStore>,
-}
-
-impl NetworkBehaviourEventProcess<GossipsubEvent> for NetworkWrapper {
-    fn inject_event(&mut self, event: GossipsubEvent) {
-        match event {
-            GossipsubEvent::Message { message, .. } => {
-                let sender = self.net_sender.clone();
-                if let Ok(pe) = serde_json::from_slice(&message.data) {
-                    tokio::spawn(async move {
-                        if let Err(e) = sender.send_timeout(pe, Duration::from_secs(1)).await {
-                            error!("{}", e.to_string());
-                        }
-                    });
-                } else {
-                    error!("deserialization falied. ");
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-impl NetworkBehaviourEventProcess<KademliaEvent> for NetworkWrapper {
-    fn inject_event(&mut self, event: KademliaEvent) {
-        info!("--------------{:?}", event);
-    }
-}
-
-impl NetworkWrapper {
-    pub async fn run(mut self, addr: Multiaddr) -> () {
-        let topic = self.topic.clone();
-        let mut stop_recvr = self.stop_recvr.take().unwrap();
-        let mut net_recvr = self.net_recvr.take().unwrap();
-        let local_key = self.local_key.clone();
+        // init state.
+        let event_sender = self.event_sender.clone();
+        let max_limit = self.max_transport_limit;
+        let mut buf: Vec<u8> = Vec::with_capacity(max_limit);
+        let mut stop_recvr = self.ctrl_ch.subscribe();
+        let mut quit = false;
 
         tokio::spawn(async move {
-            info!("peer-id = {}", &self.peer_id);
-            let transport = build_development_transport(local_key.clone()).unwrap();
-            let mut swarm = libp2p::swarm::Swarm::new(
-                transport,
-                self,
-                PeerId::from_public_key(local_key.public()),
-            );
-
-            // listening
-            if let Err(e) = libp2p::Swarm::listen_on(&mut swarm, addr) {
-                error!("{}", e.to_string());
-            }
-
-            let mut quit = false;
-            let topic = topic;
-
-            swarm.kad.bootstrap().unwrap();
-
-            info!("network component up");
             while !quit {
                 tokio::select! {
                     _ = stop_recvr.recv() => {
-                        quit = true;
+                        quit = false;
                     },
-                    Some(peer_event) = net_recvr.recv() => {
-                        if let Ok(buf) = serde_json::to_vec(&peer_event){
-                            if let Err(e) = swarm.gossip.publish(topic.clone(), buf){
-                                error!("failed to publish msg: {:?}", e);
+                    // process incoming peer event
+                    Ok(byte_len) = stream.read_u32() => {
+                        buf.resize_with(byte_len as usize, Default::default);
+
+                        if let Err(e) = stream.read_exact(&mut buf).await{
+                            error!{"{:?}", e};
+                            continue;
+                        }
+                        match serde_json::from_slice::<PeerEvent>(&buf){
+                            Ok(event) => {
+                                event_sender.send(event).await.unwrap();
+                            },
+                            Err(e) => {
+                                error!("{:?}", e);
                             }
                         }
                     },
                 }
             }
-            info!("network component down");
+            info!("forwarding task done");
         });
+        Ok(())
     }
-}
-
-pub fn network_component_pair<'a>(
-    local_key_1: Keypair,
-    peer_ids: impl IntoIterator<Item = &'a (PeerId, Multiaddr)>,
-    gossip_conf: GossipsubConfig,
-    gossip_topic: IdentTopic,
-    ch_size: usize,
-) -> (NetworkAdaptor, NetworkWrapper) {
-    let (event_sender, net_recvr) = tokio::sync::mpsc::channel(ch_size);
-    let (net_sender, event_recvr) = tokio::sync::mpsc::channel(ch_size);
-    let (stop_sender, stop_recvr) = tokio::sync::broadcast::channel(1);
-
-    let peer_id_1 = PeerId::from_public_key(local_key_1.public());
-
-    let store = MemoryStore::new(peer_id_1.clone());
-    let mut kad = Kademlia::new(peer_id_1.clone(), store);
-
-    for (peer, address) in peer_ids.into_iter() {
-        if peer != &peer_id_1 {
-            kad.add_address(peer, address.clone());
-            info!("add peer {:?}", address);
-        }
-    }
-
-    let mut gossip = gossipsub::Gossipsub::new(
-        MessageAuthenticity::Signed(local_key_1.clone()),
-        gossip_conf,
-    )
-    .expect("failed to create gossipsub");
-
-    gossip.subscribe(&gossip_topic).unwrap();
-
-    let na = NetworkAdaptor {
-        event_sender,
-        event_recvr,
-        stop_sender,
-        peer_id: peer_id_1.clone(),
-    };
-
-    let nw = NetworkWrapper {
-        net_recvr: Some(net_recvr),
-        net_sender,
-        gossip,
-        stop_recvr: Some(stop_recvr),
-        local_key: local_key_1,
-        topic: gossip_topic,
-        peer_id: peer_id_1.clone(),
-        kad,
-    };
-
-    (na, nw)
 }
