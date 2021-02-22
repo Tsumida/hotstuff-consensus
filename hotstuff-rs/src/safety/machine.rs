@@ -23,7 +23,6 @@ pub enum SafetyEvent {
 
     RecvNewViewMsg(Context, Arc<GenericQC>),
 
-    // TODO:
     // pacemaker -> statesafety, and then send new view msg.
     // leader_id, new_view,
     ViewChange(ReplicaID, u64),
@@ -34,9 +33,12 @@ pub enum SafetyEvent {
     // New transaction from client.
     NewTx(Vec<Txn>),
 
-    // TODO: duplicate, remove it.
+    // TODO: remove it.
     // NewLeader
     NewLeader(Context, ReplicaID),
+
+    // Branch synchronizing
+    BranchSync(Context, Vec<TreeNode>),
 }
 
 #[derive(Debug)]
@@ -77,6 +79,8 @@ pub trait Safety {
     fn on_commit(&mut self, node: &TreeNode) -> Result<Ready>;
 
     fn on_view_change(&mut self, leader: ReplicaID, view: ViewNumber) -> Result<Ready>;
+
+    fn on_branch_sync(&mut self, branch: Vec<TreeNode>) -> Result<Ready>;
 
     fn update_nodes(&mut self, node: &TreeNode) -> Result<Ready>;
 
@@ -122,8 +126,8 @@ pub struct Machine<S: SafetyStorage> {
 }
 
 impl<S: SafetyStorage> Safety for Machine<S> {
+    /// See Algorithm 5 in the paper.
     /// As replica, recv proposal from leader.
-    /// Note that
     fn update_nodes(&mut self, node: &TreeNode) -> Result<Ready> {
         let chain = self.storage.find_three_chain(node);
         let mut ready = Ready::Nil;
@@ -221,23 +225,9 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         prop: &TreeNode,
         justify: &GenericQC,
     ) -> Result<Ready> {
-        if let Some(qc_node) = self.storage.get_node(justify.node_hash()) {
-            // any correct qc has combined signature except for init_qc.
-            if !GenericQC::is_init_qc(&justify) {
-                let valid = self.voter.validate_qc(&qc_node, justify.combined_sign());
-                debug!("recv prop validate: {}", valid);
-                if !valid {
-                    return Err(SafetyErr::CorruptedQC);
-                }
-            }
-        } else {
-            debug!("prop.justify.node not found");
-            return Err(SafetyErr::CorruptedQC);
-        }
-
         info!("recv proposal with h = {}", prop.height());
+        let mut ready = self.verify_proposal(justify)?;
 
-        let mut ready = Ready::Nil;
         if let Some(prev_node) = self.storage.get_node(prop.justify().node_hash()) {
             if prop.height() > self.storage.get_vheight()
                 && self.safe_node(prop, prev_node.as_ref())
@@ -267,7 +257,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
             self.voter.reset(view);
             self.storage.increase_view(view);
             debug!("view change {}", self.storage.get_view());
-            Ready::UpdateQCHigh(self.get_context(), self.storage.get_leaf())
+            self.form_update_qc_high()
         } else {
             Ready::Nil
         };
@@ -300,7 +290,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 let qc_node = self.storage.get_node(qc_high.node_hash()).unwrap();
                 self.storage
                     .update_qc_high(qc_node.as_ref(), qc_high.as_ref());
-                Ok(Ready::UpdateQCHigh(self.get_context(), qc_node))
+                Ok(self.form_update_qc_high())
             }
             // TODO: remove
             SafetyEvent::NewLeader(ctx, leader) => {
@@ -310,11 +300,34 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 Ok(Ready::Nil)
             }
             SafetyEvent::ViewChange(leader, view) => self.on_view_change(leader, view),
+            SafetyEvent::BranchSync(ctx, branch) => self.on_branch_sync(branch),
             _ => {
                 error!("recv invalid msg");
                 Ok(Ready::Nil)
             }
         }
+    }
+
+    fn on_branch_sync(&mut self, branch: Vec<TreeNode>) -> Result<Ready> {
+        for prop in branch {
+            if !self.verify_proposal(&prop.justify()).is_ok() {
+                break;
+            }
+            if let Some(prev_node) = self.storage.get_node(prop.justify().node_hash()) {
+                if prop.height() > self.storage.get_vheight()
+                    && self.safe_node(&prop, prev_node.as_ref())
+                {
+                    self.storage.append_new_node(&prop);
+                    self.storage.update_vheight(prop.height());
+                }
+            };
+            let _ = self.update_nodes(&prop);
+        }
+
+        Ok(Ready::UpdateQCHigh(
+            self.get_context(),
+            self.storage.get_leaf(),
+        ))
     }
 }
 
@@ -334,6 +347,29 @@ impl<S: SafetyStorage> Machine<S> {
         Context {
             from: self.self_id.clone(),
             view: self.storage.get_view(),
+        }
+    }
+
+    fn form_update_qc_high(&self) -> Ready {
+        // Note
+        // leaf.qc == qc-high
+        Ready::UpdateQCHigh(self.get_context(), self.storage.get_leaf())
+    }
+
+    fn verify_proposal(&self, justify: &GenericQC) -> Result<Ready> {
+        if let Some(qc_node) = self.storage.get_node(justify.node_hash()) {
+            // any correct qc has combined signature except for init_qc.
+            if !GenericQC::is_init_qc(&justify) {
+                let valid = self.voter.validate_qc(&qc_node, justify.combined_sign());
+                debug!("recv prop validate: {}", valid);
+                if !valid {
+                    return Err(SafetyErr::CorruptedQC);
+                }
+            }
+            Ok(Ready::Nil)
+        } else {
+            debug!("prop.justify.node not found");
+            Err(SafetyErr::CorruptedQC)
         }
     }
 

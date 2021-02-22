@@ -1,6 +1,8 @@
-use super::mocker::{init_logger, ExpectedState, MockEvent, MockHotStuff};
-use crate::safety::machine::Ready;
+use std::sync::Arc;
 
+use super::mocker::{init_logger, ExpectedState, MockEvent, MockHotStuff};
+use crate::msg::Context;
+use crate::safety::machine::{Ready, SafetyErr, SafetyEvent};
 #[test]
 fn test_competitive_branchs() {
     //
@@ -22,7 +24,7 @@ fn test_competitive_branchs() {
 
     mhs.specify_leader(leader).specify_testee(testee).init();
 
-    mhs.recv_consecutive_proposals(vec![format!("a1"), format!("a2"), format!("a3")]);
+    mhs.testee_load_consecutive_proposals(vec![format!("a1"), format!("a2"), format!("a3")]);
 
     let expected_1 = ExpectedState::LockedAt(format!("a1"));
     mhs.check_hotstuff_state_with(&expected_1);
@@ -58,7 +60,7 @@ fn test_consecutive_commit() {
 
     mhs.specify_leader(leader).specify_testee(testee).init();
 
-    mhs.recv_consecutive_proposals(vec![
+    mhs.testee_load_consecutive_proposals(vec![
         format!("a1"),
         format!("a2"),
         format!("a3"),
@@ -93,7 +95,7 @@ fn test_propose_with_corrupted_qc() {
         .specify_adversial(adversial)
         .init();
 
-    mhs.recv_consecutive_proposals(vec![format!("a1")]);
+    mhs.testee_load_consecutive_proposals(vec![format!("a1")]);
 
     mhs.propose_with_corrupted_qc(format!("a1"), format!("a2"));
     mhs.propose_with_corrupted_qc(format!("a2"), format!("a3"));
@@ -129,7 +131,7 @@ fn test_new_proposal() {
 
     mhs.specify_leader(leader).specify_testee(testee).init();
 
-    mhs.recv_consecutive_proposals(vec![
+    mhs.testee_load_consecutive_proposals(vec![
         format!("a1"),
         format!("a2"),
         format!("a3"),
@@ -139,12 +141,12 @@ fn test_new_proposal() {
 
     // recv new-view msgs a2, a3, a4, a5,
     let output = mhs
-        .recv_new_view_msgs(vec![
+        .testee_recv_new_view_msgs(vec![
             (0, format!("a2")), // qc of a1
             (1, format!("a3")),
             (2, format!("a4")), // qc of a3
         ])
-        .make_proposal(format!("a6"));
+        .testee_make_proposal(format!("a6"));
 
     // leader's qc_high is qc of a4 => new proposal is based on q4
     if let Ready::NewProposal(_, prop, ..) = output {
@@ -177,7 +179,7 @@ fn test_corrupted_new_view_msg() {
         .specify_adversial(adversial)
         .init();
 
-    mhs.recv_consecutive_proposals(vec![
+    mhs.testee_load_consecutive_proposals(vec![
         format!("a1"),
         format!("a2"),
         format!("a3"),
@@ -186,9 +188,9 @@ fn test_corrupted_new_view_msg() {
 
     let output = mhs
         // send NewView Msg with corrupted qc of a3
-        .recv_corrupted_view_msg(format!("a3"))
+        .testee_recv_corrupted_view_msg(format!("a3"))
         // propose a5, based on a3
-        .make_proposal(format!("a5"));
+        .testee_make_proposal(format!("a5"));
 
     match output {
         Ready::NewProposal(_, prop, ..) => {
@@ -222,12 +224,12 @@ fn test_corrupted_vote() {
         .specify_adversial(adversial)
         .init();
 
-    mhs.recv_consecutive_proposals(vec![format!("a1"), format!("a2"), format!("a3")]);
+    mhs.testee_load_consecutive_proposals(vec![format!("a1"), format!("a2"), format!("a3")]);
 
     // new leader propose a3 and sign to it!
-    mhs.make_proposal(format!("a3"));
+    mhs.testee_make_proposal(format!("a3"));
 
-    mhs.recv_votes(vec![
+    mhs.testee_recv_votes(vec![
         MockEvent::AcceptedVote(2, format!("a3")),
         MockEvent::CorruptedVote(adversial, format!("a3")),
     ]);
@@ -235,8 +237,64 @@ fn test_corrupted_vote() {
     mhs.check_hotstuff_state_with(&ExpectedState::QcHighOf(format!("a2")));
 
     // recv 3 vote and form qc.
-    mhs.recv_votes(vec![MockEvent::AcceptedVote(3, format!("a3"))]);
+    mhs.testee_recv_votes(vec![MockEvent::AcceptedVote(3, format!("a3"))]);
 
     // if qc of a3 is formed, a3 will be new leaf.
     mhs.check_hotstuff_state_with(&ExpectedState::QcHighOf(format!("a3")));
+}
+
+#[test]
+fn test_sync_state() {
+    // init <- a1 <- a2 <- a3
+    //                                     <- a6  reject
+    // branch sync            <- a4 <- a5
+    //                                     <- a6  accept
+
+    // Steps:
+    // 1. The testee takes a1, a2, a3.
+    // 2. The testee got a6 based on a5, because of lack of a4, a5, testee consider a6 is corrupted and rejest it.
+    // 3. The testee got a4 <- a5 and then commit a1 <- a2, and lock at a3.
+    // 4. The testee got a6 and accept it.
+
+    let n = 4;
+    let leader = 0;
+    let testee = 0;
+    let adversial = 1;
+    let mut mhs = MockHotStuff::new(n);
+
+    init_logger();
+
+    mhs.specify_leader(leader)
+        .specify_testee(testee)
+        .specify_adversial(adversial)
+        .init();
+
+    mhs.testee_load_consecutive_proposals(vec![format!("a1"), format!("a2"), format!("a3")]);
+
+    let branch = mhs.prepare_proposals(&vec![format!("a4"), format!("a5"), format!("a6")]);
+
+    let (a6, _) = branch.last().unwrap();
+
+    let output = mhs.testee().process_safety_event(SafetyEvent::RecvProposal(
+        Context {
+            from: format!("{}", leader),
+            view: a6.height(),
+        },
+        Arc::new(a6.as_ref().clone()),
+    ));
+
+    match output {
+        Err(SafetyErr::CorruptedQC) => {}
+        _ => panic!(),
+    }
+
+    mhs.check_hotstuff_state_with(&ExpectedState::LockedAt(format!("a1")));
+
+    // sync a4 and a5
+    mhs.sync_state(branch.into_iter().map(|(node, _)| *node).take(2));
+
+    // propose a6
+    mhs.extend_from(format!("a5"), format!("a6"));
+
+    mhs.check_hotstuff_state_with(&ExpectedState::LockedAt(format!("a4")));
 }

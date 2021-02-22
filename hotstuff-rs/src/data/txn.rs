@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Txn(Vec<u8>);
+pub struct Txn(pub Vec<u8>);
 
 impl AsRef<[u8]> for Txn {
     fn as_ref(&self) -> &[u8] {

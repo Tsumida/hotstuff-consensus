@@ -17,15 +17,20 @@ use crate::{
         voter::Voter,
     },
 };
+
+const DEBUG_MODE: bool = false;
+
 pub(crate) fn init_logger() {
-    let _ = CombinedLogger::init(vec![
-        //TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Mixed),
-        WriteLogger::new(
-            LevelFilter::Debug,
-            Config::default(),
-            std::fs::File::create("./my_rust_bin.log").unwrap(),
-        ),
-    ]);
+    if DEBUG_MODE {
+        let _ = CombinedLogger::init(vec![
+            //TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Mixed),
+            WriteLogger::new(
+                LevelFilter::Debug,
+                Config::default(),
+                std::fs::File::create("./my_rust_bin.log").unwrap(),
+            ),
+        ]);
+    }
 }
 
 pub(crate) fn threshold_sign_kit(
@@ -41,7 +46,7 @@ pub(crate) fn threshold_sign_kit(
     (s, pks, vec_sk)
 }
 
-pub enum ExpectedState<'a> {
+pub(crate) enum ExpectedState<'a> {
     // for hotstuff status
     LockedAt(String),
     CommittedBeforeHeight(usize),
@@ -52,7 +57,7 @@ pub enum ExpectedState<'a> {
     QcOf(String, &'a TreeNode),
 }
 
-pub struct MockHotStuff {
+pub(crate) struct MockHotStuff {
     testee: Option<Machine<InMemoryStorage>>,
 
     pks: Option<PublicKeySet>,
@@ -77,7 +82,7 @@ pub struct MockHotStuff {
 }
 
 impl MockHotStuff {
-    pub fn new(n: usize) -> Self {
+    pub(crate) fn new(n: usize) -> Self {
         let init_qc = Arc::new((*INIT_QC).clone());
         let init_node_hash = (*INIT_NODE_HASH).clone();
 
@@ -105,26 +110,26 @@ impl MockHotStuff {
         }
     }
 
-    pub fn specify_leader(&mut self, leader: usize) -> &mut Self {
+    pub(crate) fn specify_leader(&mut self, leader: usize) -> &mut Self {
         assert!(leader < self.n);
         self.leader_id = leader;
         self
     }
 
-    pub fn specify_testee(&mut self, testee: usize) -> &mut Self {
+    pub(crate) fn specify_testee(&mut self, testee: usize) -> &mut Self {
         assert!(testee < self.n);
         self.testee_id = testee;
         self
     }
 
-    pub fn specify_adversial(&mut self, adversial: usize) -> &mut Self {
+    pub(crate) fn specify_adversial(&mut self, adversial: usize) -> &mut Self {
         assert!(adversial < self.n);
         self.adversial = Some(adversial);
         self
     }
 
     /// Initialize state.
-    pub fn init(&mut self) {
+    pub(crate) fn init(&mut self) {
         assert!(!self.init_done);
         assert!(self.n > 0);
         assert!(self.testee_id < self.n);
@@ -176,36 +181,34 @@ impl MockHotStuff {
         self.init_done = true;
     }
 
+    pub(crate) fn testee(&mut self) -> &mut dyn Safety {
+        self.testee.as_mut().unwrap()
+    }
+
     /// Construct chain for testee. Note that no qc of last proposal is formed!
     /// For example `a1 <-qc- a2 <-qc- a3`, a1 has 2 qc, a2 has one, but qc of a3 isn't formed.
-    pub fn recv_consecutive_proposals(&mut self, cmds: Vec<String>) -> &mut Self {
-        // It's init_qc now
-        let mut prev_qc = self.qc_high.clone();
-        for cmd in cmds {
-            self.height += 1;
-            // make node
-            let (node, hash) = TreeNode::node_and_hash(
-                vec![&Txn::new(cmd.as_bytes())],
-                self.height,
-                &self.parent,
-                self.qc_high.as_ref(),
-            );
-
-            let res = self.send_correct_proposal(node.as_ref(), prev_qc.as_ref());
+    pub(crate) fn testee_load_consecutive_proposals(&mut self, cmds: Vec<String>) -> &mut Self {
+        let nodes = self.prepare_proposals(&cmds);
+        for (cmd, (node, hash)) in cmds.into_iter().zip(nodes) {
+            // send proposal to testee
+            let res = self.testee_recv_honest_proposal(node.as_ref(), node.justify());
             assert!(res.is_ok(), format!("{:?}", res));
 
-            // make qc with signs from replicas,
-            prev_qc = self.form_qc(self.height, &node, &hash);
-
-            // update state
-            self.update(cmd, self.height, prev_qc.clone(), node, hash);
+            self.update(
+                cmd,
+                node.height(),
+                Arc::new(node.justify().clone()),
+                node,
+                hash,
+            );
         }
+
         self
     }
 
     /// Assertion about internal state of hotstuff module.
     /// Panic if assertion failed.  
-    pub fn check_hotstuff_state_with(&self, expected: &ExpectedState) {
+    pub(crate) fn check_hotstuff_state_with(&self, expected: &ExpectedState) {
         let ss = self.testee.as_ref().unwrap().take_snapshot();
         match expected {
             ExpectedState::LockedAt(tx) => {
@@ -228,9 +231,35 @@ impl MockHotStuff {
         };
     }
 
+    pub(crate) fn sync_state(&mut self, branch: impl IntoIterator<Item = TreeNode>) {
+        let branch: Vec<TreeNode> = branch.into_iter().collect();
+
+        // update mocker state.
+        for node in &branch {
+            self.update(
+                String::from_utf8(node.tx().first().unwrap().0.clone()).unwrap(),
+                node.height(),
+                Arc::new(node.justify().clone()),
+                Box::new(node.clone()),
+                Box::new(TreeNode::hash(node)),
+            );
+        }
+
+        let leader = self.leader_id;
+        self.testee()
+            .process_safety_event(SafetyEvent::BranchSync(
+                Context {
+                    from: format!("{}", leader),
+                    view: 6,
+                },
+                branch,
+            ))
+            .unwrap();
+    }
+
     /// let testee extends branch from specified parent`. This method will increate height.
     /// Panic if parent didn't exist.
-    pub fn extend_from(&mut self, parent: String, tx: String) {
+    pub(crate) fn extend_from(&mut self, parent: String, tx: String) {
         let parent_hash = self.tx_to_hash.get(&parent).unwrap().clone();
         let parent = self.nodes.get(&parent_hash).unwrap().clone();
         // form qc of parent and use it to create new proposal.
@@ -238,7 +267,7 @@ impl MockHotStuff {
 
         self.tick();
         let res = self.propose(&parent_hash, tx, qc);
-        assert!(if let Ok(Ready::Signature(_, _, _)) = res {
+        assert!(if let Ok(Ready::Signature(..)) = res {
             true
         } else {
             false
@@ -246,7 +275,7 @@ impl MockHotStuff {
     }
 
     /// Send new proposal with corrupted qc to testee. This method will increate height.
-    pub fn propose_with_corrupted_qc(&mut self, parent: String, tx: String) {
+    pub(crate) fn propose_with_corrupted_qc(&mut self, parent: String, tx: String) {
         let parent_hash = self.tx_to_hash.get(&parent).unwrap().clone();
 
         // form qc of parent and use it to create new proposal.
@@ -263,7 +292,7 @@ impl MockHotStuff {
     }
 
     /// Leader recv txs from other
-    pub fn recv_new_view_msgs(&mut self, txs: Vec<(usize, String)>) -> &mut Self {
+    pub(crate) fn testee_recv_new_view_msgs(&mut self, txs: Vec<(usize, String)>) -> &mut Self {
         for (i, tx) in txs.iter() {
             let node_hash = self.tx_to_hash.get(tx).unwrap();
             debug!("{}, {:?}", tx, &node_hash);
@@ -285,7 +314,8 @@ impl MockHotStuff {
         self
     }
 
-    pub fn make_proposal(&mut self, new_tx: String) -> Ready {
+    /// As leader, testee propose new proposal.
+    pub(crate) fn testee_make_proposal(&mut self, new_tx: String) -> Ready {
         self.tick();
 
         let res = self
@@ -312,7 +342,7 @@ impl MockHotStuff {
         res
     }
 
-    pub fn check_proposal_with(&self, expected: &ExpectedState) -> &Self {
+    pub(crate) fn check_proposal_with(&self, expected: &ExpectedState) -> &Self {
         match expected {
             ExpectedState::ParentIs(parent, prop) => {
                 let parent = self.tx_to_hash.get(parent).unwrap();
@@ -330,7 +360,7 @@ impl MockHotStuff {
     }
 
     /// Recv one corrupted new-view msg.
-    pub fn recv_corrupted_view_msg(&mut self, qc_node: String) -> &mut Self {
+    pub(crate) fn testee_recv_corrupted_view_msg(&mut self, qc_node: String) -> &mut Self {
         let prev_qc_hash = self.tx_to_hash.get(&qc_node).unwrap();
         let prev_qc = self.form_corrupted_qc(self.height, prev_qc_hash);
         let _ = self
@@ -347,7 +377,7 @@ impl MockHotStuff {
         self
     }
 
-    pub fn recv_votes(&mut self, votes: Vec<MockEvent>) -> &mut Self {
+    pub(crate) fn testee_recv_votes(&mut self, votes: Vec<MockEvent>) -> &mut Self {
         for vote in votes {
             match vote {
                 MockEvent::AcceptedVote(from, tx) => {
@@ -389,6 +419,31 @@ impl MockHotStuff {
         self
     }
 
+    /// Make proposals. MockHotstuff will not save this proposal like they were never proposed.
+    pub(crate) fn prepare_proposals(
+        &self,
+        cmds: &Vec<String>,
+    ) -> Vec<(Box<TreeNode>, Box<NodeHash>)> {
+        let mut prev_qc = self.qc_high.clone();
+        let mut props = Vec::with_capacity(cmds.len());
+        let mut height = self.height;
+        let mut parent = Box::new(self.parent.clone());
+        for cmd in cmds {
+            height += 1;
+            // make node
+            let (node, hash) =
+                TreeNode::node_and_hash(vec![&Txn::new(cmd.as_bytes())], height, &parent, &prev_qc);
+
+            // make qc with signs from replicas,
+            prev_qc = self.form_qc(height, &node, &hash);
+            parent = hash;
+
+            props.push((node, parent.clone()));
+        }
+
+        props
+    }
+
     /// Increase both testee and mocker's ticker.
     fn tick(&mut self) {
         self.height += 1;
@@ -419,17 +474,16 @@ impl MockHotStuff {
             parent_hash,
             &qc,
         );
-        let res = self.send_correct_proposal(&node, &qc);
+        let res = self.testee_recv_honest_proposal(&node, &qc);
         self.update(tx, self.height, qc, node, hash);
         res
     }
 
-    fn send_correct_proposal(
+    fn testee_recv_honest_proposal(
         &mut self,
         node: &TreeNode,
         justify: &GenericQC,
     ) -> Result<Ready, SafetyErr> {
-        // send node & qc to the testee
         self.testee.as_mut().unwrap().on_recv_proposal(
             &Context {
                 from: format!("mocker"),
@@ -441,12 +495,7 @@ impl MockHotStuff {
     }
 
     /// Create quorum certificate for a node.
-    fn form_qc(
-        &mut self,
-        view: ViewNumber,
-        node: &TreeNode,
-        node_hash: &NodeHash,
-    ) -> Arc<GenericQC> {
+    fn form_qc(&self, view: ViewNumber, node: &TreeNode, node_hash: &NodeHash) -> Arc<GenericQC> {
         // make qc with signs from replicas,
         let node_bytes = node.to_be_bytes();
         let signs = self
@@ -489,7 +538,7 @@ impl MockHotStuff {
     }
 }
 
-pub enum MockEvent {
+pub(crate) enum MockEvent {
     // from, tx
     CorruptedVote(usize, String),
     AcceptedVote(usize, String),
