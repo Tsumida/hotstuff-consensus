@@ -246,15 +246,16 @@ fn test_corrupted_vote() {
 #[test]
 fn test_sync_state() {
     // init <- a1 <- a2 <- a3
-    //                                     <- a6  reject
+    //                                                  <- a8  reject
     // branch sync            <- a4 <- a5
-    //                                     <- a6  accept
+    // branch sync                         <- a6 <- a7
+    //                                                  <- a8  accept
 
     // Steps:
     // 1. The testee takes a1, a2, a3.
     // 2. The testee got a6 based on a5, because of lack of a4, a5, testee consider a6 is corrupted and rejest it.
-    // 3. The testee got a4 <- a5 and then commit a1 <- a2, and lock at a3.
-    // 4. The testee got a6 and accept it.
+    // 3. The testee got a4 <- a5 <- a6 <- a7.
+    // 4. The testee got a8, accept it, locked at a6 and committed a5
 
     let n = 4;
     let leader = 0;
@@ -271,7 +272,13 @@ fn test_sync_state() {
 
     mhs.testee_load_consecutive_proposals(vec![format!("a1"), format!("a2"), format!("a3")]);
 
-    let branch = mhs.prepare_proposals(&vec![format!("a4"), format!("a5"), format!("a6")]);
+    let branch = mhs.prepare_proposals(&vec![
+        format!("a4"),
+        format!("a5"),
+        format!("a6"),
+        format!("a7"),
+        format!("a8"),
+    ]);
 
     let (a6, _) = branch.last().unwrap();
 
@@ -291,10 +298,15 @@ fn test_sync_state() {
     mhs.check_hotstuff_state_with(&ExpectedState::LockedAt(format!("a1")));
 
     // sync a4 and a5
-    mhs.sync_state(branch.into_iter().map(|(node, _)| *node).take(2));
+    mhs.sync_state(branch.iter().map(|(node, _)| node.as_ref().clone()).take(2));
+    mhs.sync_state(
+        branch[2..4]
+            .into_iter()
+            .map(|(node, _)| node.as_ref().clone()),
+    );
 
     // propose a6
-    mhs.extend_from(format!("a5"), format!("a6"));
+    mhs.extend_from(format!("a7"), format!("a8"));
 
-    mhs.check_hotstuff_state_with(&ExpectedState::LockedAt(format!("a4")));
+    mhs.check_hotstuff_state_with(&ExpectedState::LockedAt(format!("a6")));
 }
