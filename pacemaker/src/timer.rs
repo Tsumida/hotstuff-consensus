@@ -1,4 +1,6 @@
 //! Timer
+use crate::pacemaker::{CtlRecvr, CtlSender};
+
 use super::pacemaker::TchanS;
 use futures_timer::Delay;
 use hotstuff_rs::data::ViewNumber;
@@ -9,14 +11,22 @@ use std::sync::{
 };
 use std::time::Duration;
 
+#[derive(Debug, Clone)]
+pub(crate) enum TimeoutEvent {
+    ViewTimeout(ViewNumber),
+
+    // Branch synchronizing with internal [a, b]
+    BranchSyncTimeout(ViewNumber, ViewNumber),
+}
+
 /// Cancellable timer.
 pub(crate) struct DefaultTimer {
     // default 300_000 ms
     max_timeout: u64,
     rtt: u64,
-    stop_ch: tokio::sync::broadcast::Sender<()>,
+    stop_ch: CtlSender,
     // bcast_recvr: tokio::sync::broadcast::Receiver<()>,
-    notifier: TchanS<ViewNumber>,
+    notifier: TchanS<TimeoutEvent>,
     cnt: Arc<AtomicU32>,
 }
 
@@ -32,7 +42,7 @@ impl DefaultTimer {
         ))
     }
 
-    pub(crate) fn new(notifier: TchanS<ViewNumber>, max_timeout: u64, rtt: u64) -> Self {
+    pub(crate) fn new(notifier: TchanS<TimeoutEvent>, max_timeout: u64, rtt: u64) -> Self {
         let (stop_ch, _) = tokio::sync::broadcast::channel(1);
 
         Self {
@@ -45,7 +55,7 @@ impl DefaultTimer {
     }
 
     /// Start new timer.
-    pub(crate) fn start(&self, view: ViewNumber, dur: Duration) {
+    pub(crate) fn start(&self, dur: Duration, te: TimeoutEvent) {
         let mut end_ch = self.stop_ch.subscribe();
         let s = self.notifier.clone();
         let cnt = self.cnt.clone();
@@ -53,7 +63,7 @@ impl DefaultTimer {
             cnt.fetch_add(1, Ordering::SeqCst);
             tokio::select! {
                 () = Delay::new(dur) => {
-                    s.send(view).await.unwrap();
+                    s.send(te).await.unwrap();
                 },
                 _ = end_ch.recv() => {},
             };
@@ -61,20 +71,25 @@ impl DefaultTimer {
         });
     }
 
-    pub(crate) fn stop_all_timer(&self) {
+    pub(crate) fn stop_view_timer(&self) {
         if let Err(e) = self.stop_ch.send(()) {
             error!("{}", e.to_string());
         }
     }
 
-    fn num_running_timer(&self) -> u32 {
-        self.cnt.load(Ordering::SeqCst)
+    /// Timeout right now.
+    pub(crate) fn view_timeout(&mut self, this_view: ViewNumber) {
+        self.stop_view_timer();
+        self.start(
+            Duration::from_millis(1),
+            TimeoutEvent::ViewTimeout(this_view),
+        );
     }
 }
 
 impl Drop for DefaultTimer {
     fn drop(&mut self) {
-        self.stop_all_timer();
+        self.stop_view_timer();
     }
 }
 
@@ -89,13 +104,20 @@ fn test_close_all_tiemr() {
     let num = tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(async move {
-            t.start(0, t.timeout_by_delay());
-            t.start(1, t.timeout_by_delay());
+            t.start(t.timeout_by_delay(), TimeoutEvent::ViewTimeout(0));
+            t.start(t.timeout_by_delay(), TimeoutEvent::ViewTimeout(1));
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            t.stop_all_timer();
-            tokio::time::sleep(Duration::from_secs(2)).await;
-            t.num_running_timer()
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            t.stop_view_timer();
+            assert_eq!(t.cnt.load(Ordering::SeqCst), 0);
+
+            t.start(
+                t.timeout_by_delay().mul_f64(2.0), // 10 sec
+                TimeoutEvent::ViewTimeout(1),
+            );
+
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            t.cnt.load(Ordering::SeqCst)
         });
 
     assert_eq!(num, 0);

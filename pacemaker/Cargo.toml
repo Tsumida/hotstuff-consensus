@@ -17,6 +17,7 @@ log = ""
 futures-timer = ""
 rand = ""
 simplelog = ""
+thiserror = ""
 
 [[bin]]
 name = "bootstrap"

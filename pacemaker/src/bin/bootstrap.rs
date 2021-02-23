@@ -1,7 +1,4 @@
-use hotstuff_rs::msg::Context;
-use pacemaker::{data::PeerEvent, pacemaker::Pacemaker};
 use simplelog::*;
-use std::time::Duration;
 
 fn init_logger() {
     let _ = CombinedLogger::init(vec![TermLogger::new(

@@ -1,11 +1,10 @@
 //! Datastructure for liveness
 
 use hotstuff_rs::{
-    data::{GenericQC, NodeHash, ReplicaID, SignKit, TreeNode, ViewNumber},
+    data::{GenericQC, ReplicaID, SignKit, TreeNode, ViewNumber},
     msg::Context,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 pub type PeerID = String;
 
@@ -74,20 +73,28 @@ pub enum PeerEvent {
     },
     BranchSyncResponse {
         ctx: Context,
-        branch: Vec<TreeNode>,
+        strategy: BranchSyncStrategy,
+        branch: Option<BranchData>,
+        status: SyncStatus,
     },
 }
 
-impl PeerEvent {
-    // todo
-    pub fn to_be_bytes(&self) -> Vec<u8> {
-        let mut v = Vec::new();
-
-        v
-    }
-}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BranchSyncStrategy {
     // Query some specified proposal.
-    Specified { hashes: Vec<NodeHash> },
+    // Specified { hashes: Vec<NodeHash> },
+    Grow {
+        grow_from: ViewNumber,
+        end: ViewNumber,
+        batch_size: usize,
+    },
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BranchData {
+    pub data: Vec<TreeNode>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SyncStatus {
+    Success,
+    ProposalNonExists,
 }

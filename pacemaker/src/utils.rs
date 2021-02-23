@@ -2,10 +2,8 @@
 
 use hotstuff_rs::data::ViewNumber;
 use std::hash::Hasher;
-use std::time::Duration;
 
 /// Default timeout, 60 seconds.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[inline(always)]
 pub fn view_hash(view: ViewNumber, total: usize) -> usize {
@@ -28,15 +26,15 @@ fn hash_collision() {
     // index= 4, cnt=  999990, max-step=     144
     // index= 5, cnt= 1000096, max-step=     183
     // index= 6, cnt=  999988, max-step=     269
-    const n: usize = 3 * 2 + 1;
-    let mut cnt = [0; n];
-    let mut max_step = [0u64; n]; // how many steps
-    let mut prev_index = [0u64; n];
-    let flap_times = n as u64 * 1_000_000;
+    const N: usize = 3 * 2 + 1;
+    let mut cnt = [0; N];
+    let mut max_step = [0u64; N]; // how many steps
+    let mut prev_index = [0u64; N];
+    let flap_times = N as u64 * 1_000_000;
 
     let st = time::SystemTime::now();
     for view in 0..flap_times {
-        let index = view_hash(view, n);
+        let index = view_hash(view, N);
         let c = cnt.get_mut(index).unwrap();
         let s = max_step.get_mut(index).unwrap();
         let prev_view = prev_index.get_mut(index).unwrap();
