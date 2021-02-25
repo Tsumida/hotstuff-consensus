@@ -49,12 +49,14 @@ pub enum Ready {
     InternalState(Context, Snapshot),
     // Form new proposal.
     NewProposal(Context, Arc<TreeNode>),
-    //
+    // Node in this message carries qc-high
     UpdateQCHigh(Context, Arc<TreeNode>),
     // Signature for the proposal
     Signature(Context, Arc<TreeNode>, Box<SignKit>),
     // TODO: remove
     CommitState(Context, ViewNumber),
+
+    BranchSyncDone(Arc<TreeNode>),
 }
 
 /// Safety defines replica's reaction to message from other hotstuff peers.
@@ -324,10 +326,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
             let _ = self.update_nodes(&prop);
         }
 
-        Ok(Ready::UpdateQCHigh(
-            self.get_context(),
-            self.storage.get_leaf(),
-        ))
+        Ok(Ready::BranchSyncDone(self.storage.get_leaf()))
     }
 }
 
