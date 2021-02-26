@@ -3,20 +3,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{mem::MaybeUninit, unimplemented, vec};
 
+use hss::InMemoryStorage;
 use log::debug;
 use simplelog::{CombinedLogger, Config, LevelFilter, WriteLogger};
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, Signature, SignatureShare};
 
-use crate::{
-    crypto::DefaultSignaturer,
-    data::*,
-    msg::Context,
-    safety::{
-        machine::{Machine, Ready, Safety, SafetyErr, SafetyEvent},
-        safety_storage::in_mem::InMemoryStorage,
-        voter::Voter,
-    },
+use cryptokit::DefaultSignaturer;
+use hs_data::*;
+
+use hotstuff_rs::safety::{
+    machine::{Machine, Ready, Safety, SafetyErr, SafetyEvent},
+    voter::Voter,
 };
+use hs_data::msg::Context;
 
 const DEBUG_MODE: bool = false;
 
@@ -27,7 +26,7 @@ pub(crate) fn init_logger() {
             WriteLogger::new(
                 LevelFilter::Debug,
                 Config::default(),
-                std::fs::File::create("./my_rust_bin.log").unwrap(),
+                std::fs::File::create("./test-output/my_rust_bin.log").unwrap(),
             ),
         ]);
     }

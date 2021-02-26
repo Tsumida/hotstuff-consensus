@@ -1,6 +1,6 @@
 //! leader election.
 
-use hotstuff_rs::data::{ReplicaID, ViewNumber};
+use hs_data::{ReplicaID, ViewNumber};
 
 pub(crate) struct RoundRobinLeaderElector {
     // next_leader = (this_leader + 1) % peers_nums

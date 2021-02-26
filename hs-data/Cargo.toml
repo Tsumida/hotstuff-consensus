@@ -1,5 +1,5 @@
 [package]
-name = "hss"
+name = "hs-data"
 version = "0.1.0"
 authors = ["Tsumida <tsumida@163.com>"]
 edition = "2018"
@@ -7,12 +7,10 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-hotstuff-rs = {path = "../hotstuff-rs"}
-pacemaker = {path = "../pacemaker"}
-hs-data = {path = "../hs-data"} 
-cryptokit = {path = "../cryptokit"}
-sled = ""
 serde = ""
-serde_json = ""
-simplelog = ""
-log = ""
+threshold_crypto = { version = "0.4", git = "https://github.com/poanetwork/threshold_crypto" }
+rand = ""
+sha2 = ""
+base64 = ""
+thiserror = ""
+lazy_static = ""

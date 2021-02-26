@@ -3,7 +3,7 @@ use crate::pacemaker::{CtlRecvr, CtlSender};
 
 use super::pacemaker::TchanS;
 use futures_timer::Delay;
-use hotstuff_rs::data::ViewNumber;
+use hs_data::ViewNumber;
 use log::error;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
@@ -14,9 +14,8 @@ use std::time::Duration;
 #[derive(Debug, Clone)]
 pub(crate) enum TimeoutEvent {
     ViewTimeout(ViewNumber),
-
     // Branch synchronizing with internal [a, b]
-    BranchSyncTimeout(ViewNumber, ViewNumber),
+    // BranchSyncTimeout(ViewNumber, ViewNumber),
 }
 
 /// Cancellable timer.
@@ -71,7 +70,7 @@ impl DefaultTimer {
         });
     }
 
-    pub(crate) fn stop_view_timer(&self) {
+    fn stop_view_timer(&self) {
         if let Err(e) = self.stop_ch.send(()) {
             error!("{}", e.to_string());
         }

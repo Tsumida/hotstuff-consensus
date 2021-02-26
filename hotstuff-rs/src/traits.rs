@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::data::{CombinedSign, GenericQC, NodeHash, QCHash, Sign, SignID, TreeNode, ViewNumber};
+use hs_data::{CombinedSign, GenericQC, NodeHash, QCHash, Sign, SignID, TreeNode, ViewNumber};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RequestType {

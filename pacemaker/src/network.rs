@@ -4,7 +4,7 @@ use crate::{
     data::PeerEvent,
     pacemaker::{CtlSender, PeerEventRecvr, PeerEventSender},
 };
-use hotstuff_rs::data::ReplicaID;
+use hs_data::ReplicaID;
 use log::{error, info};
 use tokio::{io::AsyncReadExt, net::TcpSocket};
 

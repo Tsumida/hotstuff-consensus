@@ -1,8 +1,6 @@
-use crate::msg::Context;
-use crate::{
-    crypto::{SignErr, Signaturer},
-    data::{CombinedSign, ReplicaID, SignKit, TreeNode, ViewNumber},
-};
+use cryptokit::{SignErr, Signaturer};
+use hs_data::{msg::Context, CombinedSign, ReplicaID, SignKit, TreeNode, ViewNumber};
+
 use std::collections::HashMap;
 use thiserror::Error;
 

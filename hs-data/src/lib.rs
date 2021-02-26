@@ -1,7 +1,8 @@
-mod qc;
-mod sign_kit;
-mod tree_node;
-mod txn;
+pub mod msg;
+pub mod qc;
+pub mod sign_kit;
+pub mod tree_node;
+pub mod txn;
 
 use serde::{Deserialize, Serialize};
 

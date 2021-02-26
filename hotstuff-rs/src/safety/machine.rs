@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
+use hs_data::msg::*;
+use hs_data::*;
+
 use log::{debug, error, info};
 use thiserror::Error;
 
 use super::{safety_storage::Snapshot, voter::VoteErr, voter::Voter};
-use crate::{crypto::DefaultSignaturer, data::*, msg::Context};
+use cryptokit::DefaultSignaturer;
 
 use super::safety_storage::SafetyStorage;
 
@@ -176,7 +179,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     fn on_beat(&mut self, cmds: Vec<Txn>) -> Result<Ready> {
         let prop = self.make_leaf(&cmds);
         self.storage.update_leaf(&prop);
-        let justify = self.storage.get_qc_high();
+        // let justify = self.storage.get_qc_high();
         let ctx = self.get_context();
 
         let sign_kit = self.voter.sign(&prop);
@@ -302,7 +305,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 Ok(Ready::Nil)
             }
             SafetyEvent::ViewChange(leader, view) => self.on_view_change(leader, view),
-            SafetyEvent::BranchSync(ctx, branch) => self.on_branch_sync(branch),
+            SafetyEvent::BranchSync(_, branch) => self.on_branch_sync(branch),
             _ => {
                 error!("recv invalid msg");
                 Ok(Ready::Nil)

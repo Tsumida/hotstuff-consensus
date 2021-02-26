@@ -1,27 +1,18 @@
-pub mod in_mem;
+use hs_data::*;
 
-use crate::data::*;
-
+use log::{debug, info};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 pub trait SafetyStorage {
+    // This method promises flush all dirty data into disk.
+    fn flush(&mut self) {}
+
     // Append new node
     fn append_new_node(&mut self, node: &TreeNode);
 
     // fn append_new_qc(&mut self, qc: &GenericQC);
     fn get_node(&self, node_hash: &NodeHash) -> Option<Arc<TreeNode>>;
-
-    // fn get_qc(&self, qc_hash: &QCHash) -> Option<Arc<GenericQC>>;
-
-    // if node is genesis, return None.
-    // fn find_parent(&self, node: &TreeNode) -> Option<Arc<TreeNode>>;
-
-    // Get GenericQC by node.justify, and node should be in node pool already.
-    // fn find_qc_by_justify(&self, node_hash: &NodeHash) -> Option<Arc<GenericQC>>;
-
-    // Get node through GenericQC.node, and qc should be in node pool already.
-    // fn find_node_by_qc(&self, qc_hash: &QCHash) -> Option<Arc<TreeNode>>;
 
     // b'', b', b
     fn find_three_chain(&self, node: &TreeNode) -> Vec<Arc<TreeNode>>;

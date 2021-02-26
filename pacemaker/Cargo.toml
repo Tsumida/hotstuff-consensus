@@ -8,6 +8,8 @@ edition = "2018"
 
 [dependencies]
 hotstuff-rs = { path = "../hotstuff-rs" }
+hs-data = {path = "../hs-data"}
+cryptokit = {path = "../cryptokit"}
 fnv = "1.0.3"
 serde = ""
 serde_json = ""
@@ -18,6 +20,8 @@ futures-timer = ""
 rand = ""
 simplelog = ""
 thiserror = ""
+
+
 
 [[bin]]
 name = "bootstrap"

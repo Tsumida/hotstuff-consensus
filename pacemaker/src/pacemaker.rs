@@ -1,24 +1,23 @@
-use std::{
-    collections::VecDeque,
-    io,
-    sync::{atomic::AtomicBool, Arc},
-};
-
 use crate::{
-    data::{PeerEvent, SyncStatus},
+    data::{BranchSyncStrategy, PeerEvent, SyncStatus},
     timer::{DefaultTimer, TimeoutEvent},
 };
 use crate::{liveness_storage::LivenessStorage, network::NetworkAdaptor};
-use hotstuff_rs::{
-    data::ViewNumber,
-    safety::{
-        machine::{self, Safety},
-        safety_storage::in_mem::InMemoryStorage,
+use hotstuff_rs::safety::{
+    machine::{self, Ready, Safety, SafetyEvent},
+    safety_storage::SafetyStorage,
+};
+use hs_data::{msg::Context, ReplicaID, ViewNumber};
+use std::{
+    collections::BinaryHeap,
+    io,
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
     },
 };
 
 use log::{error, info};
-use machine::SafetyEvent;
 
 pub type TchanR<T> = tokio::sync::mpsc::Receiver<T>;
 pub type TchanS<T> = tokio::sync::mpsc::Sender<T>;
@@ -27,16 +26,82 @@ pub type PeerEventSender = TchanS<PeerEvent>;
 pub type CtlRecvr = tokio::sync::broadcast::Receiver<()>;
 pub type CtlSender = tokio::sync::broadcast::Sender<()>;
 
+const SYNC_SYNCHRONIZING: u8 = 0;
+const SYNC_IDLE: u8 = 1;
+
+static BATCH_SIZE: usize = 8;
+
+// TODO
+#[derive(Debug, Clone)]
+pub(crate) struct SafetyEventWrapper {
+    pub se: SafetyEvent,
+    pub view: i64,
+}
+
+impl Eq for SafetyEventWrapper {}
+
+impl Ord for SafetyEventWrapper {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.view.cmp(&other.view)
+    }
+}
+
+impl PartialOrd for SafetyEventWrapper {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for SafetyEventWrapper {
+    fn eq(&self, other: &Self) -> bool {
+        self.view == other.view
+    }
+}
+
+impl SafetyEventWrapper {
+    fn from(view: ViewNumber, se: SafetyEvent) -> Self {
+        Self {
+            view: -1 * view as i64,
+            se,
+        }
+    }
+}
+
+impl Into<SafetyEvent> for SafetyEventWrapper {
+    fn into(self) -> SafetyEvent {
+        self.se
+    }
+}
+
+#[test]
+fn test_pending_prop() {
+    use std::mem::MaybeUninit;
+    let mut pending_prop: BinaryHeap<SafetyEventWrapper> = BinaryHeap::with_capacity(3);
+    pending_prop.push(SafetyEventWrapper::from(0, unsafe {
+        MaybeUninit::uninit().assume_init()
+    }));
+    pending_prop.push(SafetyEventWrapper::from(1, unsafe {
+        MaybeUninit::uninit().assume_init()
+    }));
+    pending_prop.push(SafetyEventWrapper::from(2, unsafe {
+        MaybeUninit::uninit().assume_init()
+    }));
+
+    assert!(0 == pending_prop.pop().unwrap().view);
+    assert!(-1 == pending_prop.pop().unwrap().view);
+    assert!(-2 == pending_prop.pop().unwrap().view);
+}
+
 pub struct Pacemaker<S: LivenessStorage + Send + Sync> {
     // pacemaker identifier
     view: ViewNumber,
-    // id: ReplicaID,
+    id: ReplicaID,
     elector: crate::elector::RoundRobinLeaderElector,
     // LivenessStorage implementation. May be wrapped by Arc
     storage: S,
 
-    sync_state: Arc<AtomicBool>,
-    pending_prop: VecDeque<SafetyEvent>,
+    sync_state: Arc<AtomicU8>,
+    pending_prop: BinaryHeap<SafetyEventWrapper>,
 
     machine_adaptor: AsyncMachineAdaptor,
     net_adaptor: NetworkAdaptor,
@@ -78,18 +143,27 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
         match te {
             TimeoutEvent::ViewTimeout(view) => {
                 if view >= self.view {
-                    self.timer.stop_view_timer();
                     self.goto_new_view(view);
                     self.timer.start(
                         self.timer.timeout_by_delay(),
                         TimeoutEvent::ViewTimeout(self.view),
                     );
+
+                    // check pending_prop
+                    if self
+                        .sync_state
+                        .compare_exchange(
+                            SYNC_SYNCHRONIZING,
+                            SYNC_IDLE,
+                            Ordering::SeqCst,
+                            Ordering::SeqCst,
+                        )
+                        .is_ok()
+                    {
+                        self.check_pending_prop(self.storage.get_leaf().height())
+                            .await?
+                    }
                 }
-            }
-            TimeoutEvent::BranchSyncTimeout(lower, upper) => {
-                // check pending_prop
-                self.check_pending_prop(self.storage.get_qc_high().height())
-                    .await?
             }
         }
 
@@ -104,8 +178,12 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
                     self.emit_safety_event(SafetyEvent::RecvProposal(ctx, Arc::new(*prop)))
                         .await?;
                 } else {
-                    self.pending_prop
-                        .push_back(SafetyEvent::RecvProposal(ctx, Arc::new(*prop)));
+                    self.pending_prop.push(SafetyEventWrapper::from(
+                        prop.height(),
+                        SafetyEvent::RecvProposal(ctx, Arc::new(*prop)),
+                    ));
+                    self.check_pending_prop(self.storage.get_leaf().height())
+                        .await?;
                 }
             }
             PeerEvent::AcceptProposal { ctx, prop, sign } => {
@@ -116,7 +194,7 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
             }
             PeerEvent::Timeout { ctx, tc } => {
                 info!("recv timeout msg view={} from {}", ctx.view, &ctx.from);
-                match self.storage.append_tc(&tc) {
+                match self.storage.append_tc(tc) {
                     Ok(v) => {
                         if v > self.view {
                             // view=self.view timeouts right now.
@@ -184,8 +262,6 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
                 if let Err(e) = self.storage.update_qc_high(node.justify()) {
                     error!("{:?}", e);
                 }
-                // check pending
-                self.check_pending_prop(node.height()).await?
             }
             machine::Ready::Signature(ctx, prop, sign) => {
                 self.emit_peer_event(PeerEvent::AcceptProposal {
@@ -196,21 +272,64 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
                 .await?;
             }
             machine::Ready::CommitState(_, _) => {}
+            machine::Ready::BranchSyncDone(leaf) => {
+                // BranchSync
+                if self
+                    .sync_state
+                    .compare_exchange(
+                        SYNC_SYNCHRONIZING,
+                        SYNC_IDLE,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
+                    .is_ok()
+                {
+                    info!("branch sync done, leaf={}", leaf.height());
+                    self.check_pending_prop(leaf.height()).await?;
+                }
+            }
         }
         Ok(())
     }
 
-    async fn check_pending_prop(&mut self, node_height: ViewNumber) -> io::Result<()> {
-        if let Some(SafetyEvent::RecvProposal(ctx, pending_new_prop)) =
-            self.pending_prop.pop_front()
-        {
-            if pending_new_prop.justify().view() == node_height {
-                self.emit_safety_event(SafetyEvent::RecvProposal(ctx, pending_new_prop))
-                    .await?;
+    /// Check pending queue, start branch synchronization if there are proposals lack of `justify.node` .
+    async fn check_pending_prop(&mut self, leaf_height: ViewNumber) -> io::Result<()> {
+        if let Some(sw) = self.pending_prop.pop() {
+            let view = -sw.view as ViewNumber;
+            if view <= leaf_height {
+                self.emit_safety_event(sw.se).await?;
             } else {
                 // re-push
-                self.pending_prop
-                    .push_front(SafetyEvent::RecvProposal(ctx, pending_new_prop));
+                self.pending_prop.push(sw);
+                // start synchronizing
+                if self
+                    .sync_state
+                    .compare_exchange(
+                        SYNC_IDLE,
+                        SYNC_SYNCHRONIZING,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
+                    .is_ok()
+                {
+                    let grow_from = self.storage.get_locked_node().height();
+
+                    info!(
+                        "start branch sync: from={}, batch-size={}]",
+                        grow_from, BATCH_SIZE
+                    );
+                    self.emit_peer_event(PeerEvent::BranchSyncRequest {
+                        ctx: Context {
+                            from: self.id.clone(),
+                            view: self.view,
+                        },
+                        strategy: BranchSyncStrategy::Grow {
+                            grow_from,
+                            batch_size: BATCH_SIZE,
+                        },
+                    })
+                    .await?;
+                }
             }
         }
         Ok(())
@@ -260,14 +379,17 @@ impl AsyncMachineAdaptor {
 }
 
 /// Async wrapper for `Machine`.
-pub struct AsyncMachineWrapper {
+pub struct AsyncMachineWrapper<S>
+where
+    S: SafetyStorage,
+{
     // buffer.
     safety_in: TchanR<machine::SafetyEvent>,
     ready_out: TchanS<machine::Ready>,
-    machine: machine::Machine<InMemoryStorage>,
+    machine: machine::Machine<S>,
 }
 
-impl AsyncMachineWrapper {
+impl<S: SafetyStorage> AsyncMachineWrapper<S> {
     pub async fn run(&mut self, mut quit_ch: CtlRecvr) -> io::Result<()> {
         info!("machine up");
         let mut quit = false;

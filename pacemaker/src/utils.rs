@@ -1,10 +1,9 @@
 //! Something useful for devlopment.
 
-use hotstuff_rs::data::ViewNumber;
+use hs_data::ViewNumber;
 use std::hash::Hasher;
 
 /// Default timeout, 60 seconds.
-
 #[inline(always)]
 pub fn view_hash(view: ViewNumber, total: usize) -> usize {
     let mut h = fnv::FnvHasher::default();

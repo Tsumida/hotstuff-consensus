@@ -2,7 +2,7 @@
 //!
 
 use crate::data::{BranchData, BranchSyncStrategy, TimeoutCertificate};
-use hotstuff_rs::data::{GenericQC, TreeNode, ViewNumber};
+use hs_data::{GenericQC, TreeNode, ViewNumber};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
@@ -18,6 +18,9 @@ pub enum LivenessStorageErr {
 
     #[error("Invalid branch data")]
     InvalidBranch(BranchData),
+
+    #[error("Failed to stablize data")]
+    FailedToStablize,
 }
 
 /// LivenessStorage should be able to verify data from ohter peers.
@@ -25,23 +28,17 @@ pub trait LivenessStorage {
     /// Idempotently appending new TimeoutCertificates.
     /// Return `true` if there are at least `n-f` TCs from different replicas,
     /// which means that view is timeout and pacemaker should only process messages with larger view.
-    fn append_tc(&mut self, tc: &TimeoutCertificate) -> Result<ViewNumber, LivenessStorageErr>;
+    fn append_tc(&mut self, tc: TimeoutCertificate) -> Result<ViewNumber, LivenessStorageErr>;
 
     /// Return `true` if there are at least `n-f` TCs from different replicas,
     /// which means that view is timeout and pacemaker should only process messages with larger view.
     fn is_reach_threshold(&self, view: ViewNumber) -> bool;
 
-    /// Update QC-High (highest GenericQC this replica has ever seen)
-    /// TODO: consider use TreeNode.
+    /// Procedure `UpdateQCHigh(qc'high)` in Algorithm 5. This method will update qc-high and leaf. New leaf is qc-high.node.
     fn update_qc_high(&mut self, qc: &GenericQC) -> Result<(), LivenessStorageErr>;
 
-    /// Append branch data
-    fn sync_branch(
-        &mut self,
-        strategy: &BranchSyncStrategy,
-        branch: BranchData,
-    ) -> Result<(), LivenessStorageErr>;
-
+    /// Fetch branch according strategy.
+    /// - Using `Grow` strategy, the resposer returns branch `[grow_from, min(grow_from + batch_size, responser.leaf)]`
     fn fetch_branch(&self, strategy: &BranchSyncStrategy)
         -> Result<BranchData, LivenessStorageErr>;
 
@@ -49,5 +46,6 @@ pub trait LivenessStorage {
 
     fn get_locked_node(&mut self) -> &TreeNode;
 
-    fn get_qc_high(&self) -> &TreeNode;
+    /// Leaf carries qc-high
+    fn get_leaf(&self) -> &TreeNode;
 }

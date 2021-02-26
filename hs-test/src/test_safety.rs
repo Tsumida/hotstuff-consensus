@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use super::mocker::{init_logger, ExpectedState, MockEvent, MockHotStuff};
-use crate::msg::Context;
-use crate::safety::machine::{Ready, SafetyErr, SafetyEvent};
+use hotstuff_rs::safety::machine::{Ready, SafetyErr, SafetyEvent};
+use hs_data::msg::Context;
 #[test]
 fn test_competitive_branchs() {
     //

@@ -1,9 +1,8 @@
 //! Datastructure for liveness
 
-use hotstuff_rs::{
-    data::{GenericQC, ReplicaID, SignKit, TreeNode, ViewNumber},
-    msg::Context,
-};
+use cryptokit::{DefaultSignaturer, Signaturer};
+use hs_data::msg::Context;
+use hs_data::{CombinedSign, GenericQC, ReplicaID, SignKit, TreeNode, ViewNumber};
 use serde::{Deserialize, Serialize};
 
 pub type PeerID = String;
@@ -15,8 +14,13 @@ pub type PeerID = String;
 pub struct TimeoutCertificate {
     from: ReplicaID,
     view: ViewNumber,
-    view_sign: SignKit, // partial sign
+    view_sign: SignType,
     qc_high: GenericQC,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SignType {
+    Partial(SignKit),
+    Combined(CombinedSign),
 }
 
 impl TimeoutCertificate {
@@ -24,7 +28,21 @@ impl TimeoutCertificate {
         Self {
             from,
             view,
-            view_sign,
+            view_sign: SignType::Partial(view_sign),
+            qc_high,
+        }
+    }
+
+    pub fn compressed(
+        from: ReplicaID,
+        view: ViewNumber,
+        view_sign: CombinedSign,
+        qc_high: GenericQC,
+    ) -> Self {
+        Self {
+            from,
+            view,
+            view_sign: SignType::Combined(view_sign),
             qc_high,
         }
     }
@@ -37,12 +55,52 @@ impl TimeoutCertificate {
         self.view
     }
 
-    pub fn view_sign(&self) -> &SignKit {
+    pub fn view_sign(&self) -> &SignType {
         &self.view_sign
     }
 
     pub fn qc_high(&self) -> &GenericQC {
         &self.qc_high
+    }
+}
+
+/// Combine TCs with paritial signature into a new TC with threshold signature.
+/// Return `None` while it cannot produce a threshold signature.
+/// This function may help compressing time certificates,
+/// Make sure the threshold signature algorithm will **produce the same output for any different partial signature set ps1 and ps2**,
+/// where `|ps1| > t, |ps2| > t` and `t` is the threshold, since different node set may receive different time certificate set.
+pub fn combine_time_certificates<'a>(
+    signaturer: &DefaultSignaturer,
+    from: &ReplicaID,
+    view: ViewNumber,
+    qc_high: GenericQC,
+    tcs: impl IntoIterator<Item = &'a TimeoutCertificate>,
+) -> Option<TimeoutCertificate> {
+    let iter_partial_signs = tcs
+        .into_iter()
+        .filter(|tc| {
+            if let SignType::Partial(_) = tc.view_sign {
+                true
+            } else {
+                false
+            }
+        })
+        .map(|tc| {
+            if let SignType::Partial(ps) = tc.view_sign() {
+                ps
+            } else {
+                unreachable!()
+            }
+        });
+
+    match signaturer.combine_partial_sign(iter_partial_signs) {
+        Ok(s) => Some(TimeoutCertificate::compressed(
+            from.clone(),
+            view,
+            *s,
+            qc_high,
+        )),
+        Err(_) => None,
     }
 }
 
@@ -85,7 +143,6 @@ pub enum BranchSyncStrategy {
     // Specified { hashes: Vec<NodeHash> },
     Grow {
         grow_from: ViewNumber,
-        end: ViewNumber,
         batch_size: usize,
     },
 }

@@ -5,10 +5,10 @@
 //!
 //!
 
-use crate::data::{CombinedSign, SignID, SignKit, TreeNode};
-use crate::data::{PK, SK};
+use hs_data::{CombinedSign, SignID, SignKit, TreeNode, PK, SK};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+
 // TODO
 #[derive(Debug, Clone, Serialize, Deserialize, Error)]
 pub enum SignErr {
@@ -65,7 +65,7 @@ impl Signaturer for DefaultSignaturer {
 
         match self.pks.combine_signatures(voters) {
             Ok(s) => Ok(Box::new(s)),
-            Err(e) => Err(SignErr::InsufficientSigns(self.pks.threshold(), voter_num)),
+            Err(_) => Err(SignErr::InsufficientSigns(self.pks.threshold(), voter_num)),
         }
     }
 

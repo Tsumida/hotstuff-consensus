@@ -51,7 +51,7 @@ impl TreeNode {
             justify: justify.clone(),
         });
 
-        let hash = Box::new(TreeNode::hash(&node));
+        // let hash = Box::new(TreeNode::hash(&node));
 
         node
     }
