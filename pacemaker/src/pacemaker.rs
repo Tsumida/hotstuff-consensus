@@ -3,10 +3,7 @@ use crate::{
     timer::{DefaultTimer, TimeoutEvent},
 };
 use crate::{liveness_storage::LivenessStorage, network::NetworkAdaptor};
-use hotstuff_rs::safety::{
-    machine::{self, Ready, Safety, SafetyEvent},
-    safety_storage::SafetyStorage,
-};
+use hotstuff_rs::safety::machine::{self, Safety, SafetyEvent, SafetyStorage};
 use hs_data::{msg::Context, ReplicaID, ViewNumber};
 use std::{
     collections::BinaryHeap,

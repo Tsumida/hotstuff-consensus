@@ -11,8 +11,9 @@ hotstuff-rs = {path = "../hotstuff-rs"}
 pacemaker = {path = "../pacemaker"}
 hs-data = {path = "../hs-data"} 
 cryptokit = {path = "../cryptokit"}
-sled = ""
+base64 = ""
 serde = ""
 serde_json = ""
 simplelog = ""
 log = ""
+sqlx = { version = "0.4.1", features = [ "mysql", "runtime-tokio-rustls" ] }

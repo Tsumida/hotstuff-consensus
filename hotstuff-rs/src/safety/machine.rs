@@ -6,12 +6,78 @@ use hs_data::*;
 use log::{debug, error, info};
 use thiserror::Error;
 
-use super::{safety_storage::Snapshot, voter::VoteErr, voter::Voter};
+use super::{voter::VoteErr, voter::Voter};
 use cryptokit::DefaultSignaturer;
 
-use super::safety_storage::SafetyStorage;
-
 pub type Result<T> = core::result::Result<T, SafetyErr>;
+
+use serde::{Deserialize, Serialize};
+
+pub trait SafetyStorage {
+    /// `flush()` promises that all dirty data were stablized.
+    fn flush(&mut self) -> Result<()>;
+
+    /// Append new node and the qc it carries;
+    fn append_new_node(&mut self, node: &TreeNode);
+
+    /// Append a qc only.
+    /// Use this method when a rejected proposal carrying a valid qc is encountered.
+    fn append_new_qc(&mut self, qc: &GenericQC);
+
+    /// fn append_new_qc(&mut self, qc: &GenericQC);
+    fn get_node(&self, node_hash: &NodeHash) -> Option<Arc<TreeNode>>;
+
+    /// Get three-chain `b'' -> b' -> b`. The first node is `b''`.
+    fn find_three_chain(&self, node: &TreeNode) -> Vec<Arc<TreeNode>>;
+
+    /// Return True if `b.parent is b' and b'.parent is b'' `.
+    fn is_consecutive_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool;
+
+    fn is_conflicting(&self, a: &TreeNode, b: &TreeNode) -> bool;
+
+    fn get_qc_high(&self) -> Arc<GenericQC>;
+
+    fn update_qc_high(&mut self, qc_node: &TreeNode, qc_high: &GenericQC);
+
+    fn get_leaf(&self) -> Arc<TreeNode>;
+
+    // Check height before update leaf.
+    fn update_leaf(&mut self, new_leaf: &TreeNode);
+
+    fn get_locked_node(&self) -> Arc<TreeNode>;
+
+    /// Update locked node
+    fn update_locked_node(&mut self, node: &TreeNode);
+
+    fn get_last_executed(&self) -> Arc<TreeNode>;
+
+    fn update_last_executed_node(&mut self, node: &TreeNode);
+
+    fn get_view(&self) -> ViewNumber;
+
+    fn increase_view(&mut self, new_view: ViewNumber);
+
+    fn commit(&mut self, node: &TreeNode);
+
+    // Get height of last voted node.
+    fn get_vheight(&self) -> ViewNumber;
+
+    // return previous viewnumber.
+    fn update_vheight(&mut self, vheight: ViewNumber) -> ViewNumber;
+
+    fn hotstuff_status(&self) -> Snapshot;
+}
+
+/// Snapshot for machine's internal state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Snapshot {
+    pub view: ViewNumber,
+    pub leader: Option<ReplicaID>,
+    pub qc_high: Box<GenericQC>,
+    pub leaf: Box<TreeNode>,
+    pub locked_node: Box<TreeNode>,
+    pub last_committed: ViewNumber,
+}
 
 #[derive(Clone, Debug)]
 pub enum SafetyEvent {
@@ -115,6 +181,9 @@ pub enum SafetyErr {
     // we actually can't recongnize whether this qc is corrupted or correct.
     #[error("corrupted qc")]
     CorruptedQC,
+
+    #[error("Internal storage error")]
+    InternalErr(Box<dyn std::error::Error>),
 }
 
 pub struct Machine<S: SafetyStorage> {

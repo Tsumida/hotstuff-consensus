@@ -152,8 +152,6 @@ impl MockHotStuff {
         let view = 0;
         let mut node_pool = HashMap::new();
         node_pool.insert(init_node_hash.clone(), init_node.clone());
-        let mut qc_map = HashMap::new();
-        qc_map.insert(init_qc_hash.clone(), init_qc.clone());
 
         self.parent = init_node_hash;
         self.qc_high = init_qc;
@@ -166,8 +164,7 @@ impl MockHotStuff {
                 self.sk.as_ref().unwrap().secret_key_share(self.testee_id),
             ),
         );
-        let storage =
-            InMemoryStorage::new(node_pool, qc_map, view, &init_node, self.qc_high.as_ref());
+        let storage = InMemoryStorage::new(view, &init_node, self.qc_high.as_ref());
         let testee: Machine<InMemoryStorage> = Machine::new(
             voter,
             format!("{}", self.testee_id),
