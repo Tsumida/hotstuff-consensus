@@ -1,18 +1,5 @@
 //! Pacemaker test.
 
-use std::collections::{BinaryHeap, HashMap};
-
-use hotstuff_rs::safety::machine::SafetyStorage;
-use hs_data::ReplicaID;
-use hss::HotstuffStorage;
-use pacemaker::{
-    elector::RoundRobinLeaderElector,
-    pacemaker::{AsyncMachineAdaptor, AsyncMachineWrapper, Pacemaker},
-};
-
-fn create_async_machine_pair<S: SafetyStorage>() -> (AsyncMachineWrapper<S>, AsyncMachineAdaptor) {
-    unimplemented!()
-}
 /*
 fn default_pacemaker_test_kit(storage: HotstuffStorage) {
     let n = 4;
@@ -47,6 +34,22 @@ fn default_pacemaker_test_kit(storage: HotstuffStorage) {
 */
 #[cfg(test)]
 mod test {
+    /*
+    use std::collections::{BinaryHeap, HashMap};
+
+    use hotstuff_rs::safety::machine::SafetyStorage;
+    use hs_data::ReplicaID;
+    use hss::HotstuffStorage;
+    use pacemaker::{
+        elector::RoundRobinLeaderElector,
+        pacemaker::{AsyncMachineAdaptor, AsyncMachineWrapper, Pacemaker},
+    };
+
+    fn create_async_machine_pair<S: SafetyStorage>() -> (AsyncMachineWrapper<S>, AsyncMachineAdaptor)
+    {
+        unimplemented!()
+    }
+
 
     #[test]
     fn test_bootstrap() {}
@@ -58,5 +61,5 @@ mod test {
     fn test_view_change() {}
 
     #[test]
-    fn test_local_timeout() {}
+    fn test_local_timeout() {}*/
 }

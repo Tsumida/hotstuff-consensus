@@ -169,6 +169,7 @@ impl MockHotStuff {
         let storage = hss::init_in_mem_storage(
             self.n,
             &INIT_NODE,
+            &INIT_NODE_HASH,
             &INIT_QC,
             format!("replica-{}", self.testee_id),
             peer_addr,

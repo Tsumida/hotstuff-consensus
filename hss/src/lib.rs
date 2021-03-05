@@ -301,6 +301,7 @@ impl MySQLStorage {}
 pub fn init_in_mem_storage(
     total: usize,
     init_node: &TreeNode,
+    init_node_hash: &NodeHash,
     init_qc: &GenericQC,
     self_id: ReplicaID,
     peers_addr: HashMap<ReplicaID, String>,
@@ -315,8 +316,9 @@ pub fn init_in_mem_storage(
         peers_addr,
     };
 
-    let hss = HotstuffStorage::new(token, init_node, init_qc, conf, signaturer, None);
-    // hss.append_new_node(init_node);
+    let mut hss = HotstuffStorage::new(token, init_node, init_qc, conf, signaturer, None);
+    hss.in_mem_queue
+        .insert(init_node_hash.clone(), Arc::new(init_node.clone()));
     hss
 }
 
@@ -674,7 +676,7 @@ impl SafetyStorage for HotstuffStorage {
         let node = Arc::new(node.clone());
 
         // Warning: OOM since every node has a replica in memory.
-        self.insert(h, node.clone());
+        self.insert(h, node);
     }
 
     fn append_new_qc(&mut self, qc: &GenericQC) {
