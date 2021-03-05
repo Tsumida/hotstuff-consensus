@@ -10,8 +10,13 @@ edition = "2018"
 hotstuff-rs = {path="../hotstuff-rs"}
 hs-data = {path = "../hs-data"}
 cryptokit = {path = "../cryptokit"}
+hss = {path="../hss"}
 threshold_crypto = { version = "0.4", git = "https://github.com/poanetwork/threshold_crypto" }
 simplelog = ""
 log = ""
-hss = {path="../hss"}
 rand = "=0.7.3"
+sqlx = { version = "0.5", features = [ "mysql", "runtime-tokio-rustls" ] }
+tokio = {version = "1.2", features=["full"]}
+base64 = ""
+serde = ""
+serde_json = ""

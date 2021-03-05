@@ -13,15 +13,16 @@ pub type Result<T> = core::result::Result<T, SafetyErr>;
 
 use serde::{Deserialize, Serialize};
 
+/// SafetyStorage
+#[async_trait::async_trait]
 pub trait SafetyStorage {
-    /// `flush()` promises that all dirty data were stablized.
-    fn flush(&mut self) -> Result<()>;
+    async fn flush(&mut self) -> Result<()>;
 
-    /// Append new node and the qc it carries;
+    /// Append new node and the qc it carries. Use this method if and only if node is verified and the qc it carries is valid.
     fn append_new_node(&mut self, node: &TreeNode);
 
-    /// Append a qc only.
-    /// Use this method when a rejected proposal carrying a valid qc is encountered.
+    /// Append a valid qc only.
+    /// Use this method even when a rejected proposal carrying a valid qc is encountered.
     fn append_new_qc(&mut self, qc: &GenericQC);
 
     /// fn append_new_qc(&mut self, qc: &GenericQC);
@@ -230,6 +231,16 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     }
 
     fn safe_node(&mut self, node: &TreeNode, justify_node: &TreeNode) -> bool {
+        //
+        //  non-conflict
+        //
+        //          a <--- .... <--- b
+        //
+        //  conflicting
+        //               <--- b
+        //              /
+        //      <--- c <----- a
+        //
         let locked = self.storage.get_locked_node();
         let conflicting = self.storage.is_conflicting(node, &locked);
 
@@ -306,6 +317,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
             if prop.height() > self.storage.get_vheight()
                 && self.safe_node(prop, prev_node.as_ref())
             {
+                // Implicitly append qc.
                 self.storage.append_new_node(&prop);
                 self.storage.update_vheight(prop.height());
                 // sign
@@ -320,6 +332,9 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                     Box::new(sign_kit),
                 );
             }
+        } else {
+            // The qc is verified, so we take it.
+            self.storage.append_new_qc(prop.justify());
         };
         let _ = self.update_nodes(prop);
         Ok(ready)

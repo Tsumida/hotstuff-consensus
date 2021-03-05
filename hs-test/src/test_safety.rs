@@ -3,6 +3,8 @@ use std::sync::Arc;
 use super::mocker::{init_logger, ExpectedState, MockEvent, MockHotStuff};
 use hotstuff_rs::safety::machine::{Ready, SafetyErr, SafetyEvent};
 use hs_data::msg::Context;
+use hss::MySQLStorage;
+
 #[test]
 fn test_competitive_branchs() {
     //
@@ -24,7 +26,8 @@ fn test_competitive_branchs() {
 
     mhs.specify_leader(leader).specify_testee(testee).init();
 
-    mhs.testee_load_consecutive_proposals(vec![format!("a1"), format!("a2"), format!("a3")]);
+    let v = vec![format!("a1"), format!("a2"), format!("a3")];
+    mhs.testee_load_consecutive_proposals(v);
 
     let expected_1 = ExpectedState::LockedAt(format!("a1"));
     mhs.check_hotstuff_state_with(&expected_1);

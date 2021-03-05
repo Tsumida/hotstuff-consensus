@@ -20,7 +20,7 @@ futures-timer = ""
 rand = ""
 simplelog = ""
 thiserror = ""
-
+async-trait = ""
 
 
 [[bin]]

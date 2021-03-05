@@ -4,6 +4,8 @@ pub mod sign_kit;
 pub mod tree_node;
 pub mod txn;
 
+use std::{convert::TryInto, mem::transmute_copy};
+
 use serde::{Deserialize, Serialize};
 
 pub use qc::*;
@@ -19,8 +21,7 @@ pub type ReplicaID = String;
 pub type ViewNumber = u64;
 pub type SignID = usize;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub enum Role {
-    Leader,
-    Follower,
+pub fn combined_sign_from_vec_u8(v: Vec<u8>) -> CombinedSign {
+    let buf: [u8; 96] = v.try_into().unwrap();
+    CombinedSign::from_bytes(buf).unwrap()
 }

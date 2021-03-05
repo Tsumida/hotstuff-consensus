@@ -2,23 +2,275 @@
 
 // pub mod sqlite;
 
-use cryptokit::{DefaultSignaturer, Signaturer};
+use cryptokit::DefaultSignaturer;
 use hotstuff_rs::safety::machine::{SafetyStorage, Snapshot};
 use hs_data::*;
-use hs_data::{TreeNode, ViewNumber};
 use log::{debug, error, info};
 use pacemaker::{
     data::{combine_time_certificates, BranchData, BranchSyncStrategy, TimeoutCertificate},
     liveness_storage::{LivenessStorage, LivenessStorageErr},
 };
-use sqlx::{mysql::MySqlRow, Row};
+use sqlx::{mysql::MySqlRow, Executor, MySqlPool, Row};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    future::Future,
-    sync::{Arc, Condvar},
+    sync::Arc,
+    time::SystemTime,
 };
 
+use thiserror::Error;
+#[derive(Debug, Clone, Error)]
+pub enum HotStuffStroageErr {
+    #[error("falied to flush, internal err")]
+    FailedToFlush,
+}
+
+fn map_row_to_proposal(row: MySqlRow) -> (NodeHash, Arc<TreeNode>) {
+    let view: ViewNumber = row.get(0);
+    let parent_hash: String = row.get(1);
+    // let justify_view: ViewNumber = row.get(2);
+    // let prop_hash: String = row.get(3);
+    let tx: String = row.get(4);
+    let node_hash: NodeHash =
+        NodeHash::from_vec(&base64::decode(&row.get::<String, _>(6)).unwrap());
+    let combined_sign: String = row.get(7);
+    let node = Arc::new(TreeNode {
+        height: view,
+        txs: serde_json::from_str(&tx).unwrap(),
+        parent: NodeHash::from_vec(&base64::decode(&parent_hash).unwrap()),
+        justify: GenericQC::new(
+            view,
+            &node_hash,
+            &combined_sign_from_vec_u8(base64::decode(&combined_sign).unwrap()),
+        ),
+    });
+
+    (node_hash, node)
+}
+
+async fn get_one_node_by_view(
+    conn_pool: &MySqlPool,
+    view: ViewNumber,
+) -> Result<(NodeHash, Arc<TreeNode>), sqlx::Error> {
+    //  0       1               2           3            4        5           6               7
+    // view | parent_hash | justify_view | prop_hash |  tx  | qc.view | qc.node_hash | qc.combined_sign
+    sqlx::query(
+        "select * from proposal inner join qc 
+        on proposal.justify_view=qc.view 
+        where proposal.view = ? limit 1",
+    )
+    .bind(view)
+    .map(|row: MySqlRow| map_row_to_proposal(row))
+    .fetch_one(conn_pool)
+    .await
+}
+
+async fn recover_tc_map(
+    conn_pool: &MySqlPool,
+) -> BTreeMap<ViewNumber, HashSet<TimeoutCertificate>> {
+    let mut tc_map = BTreeMap::new();
+    sqlx::query("select view, partial_tc from partial_tc;")
+        .fetch_all(conn_pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .for_each(|row: MySqlRow| {
+            let view: ViewNumber = row.get(0);
+            let tc: TimeoutCertificate =
+                serde_json::from_str(&row.get::<String, usize>(1)).unwrap();
+
+            let tcs = tc_map.entry(view).or_insert(HashSet::new());
+            tcs.insert(tc);
+        });
+
+    tc_map
+}
+
+async fn recover_hotstuff_config(conn_pool: &MySqlPool) -> HotStuffConfig {
+    let (token, total, replica_id, addr) =
+        sqlx::query("select token, total, self_id, self_addr from hotstuff_conf limit 1; ")
+            .map(|row: MySqlRow| {
+                let token: String = row.get(0);
+                let total: usize = row.get::<u64, _>(1) as usize;
+                let replica_id: String = row.get(2);
+                let addr: String = row.get(4);
+
+                (token, total, replica_id, addr)
+            })
+            .fetch_one(conn_pool)
+            .await
+            .unwrap();
+
+    let peers_addr: HashMap<ReplicaID, String> = sqlx::query("select replica_id, addr from peers;")
+        .map(|row: MySqlRow| {
+            let replica_id: String = row.get(0);
+            let addr: String = row.get(1);
+            (replica_id, addr)
+        })
+        .fetch_all(conn_pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .collect();
+
+    HotStuffConfig {
+        token,
+        total,
+        replica_id,
+        peers_addr,
+    }
+}
+
+async fn recover_hotstuff_state(conn_pool: &MySqlPool) -> InMemoryState {
+    // load hotstuff_state
+    let (token, current_view, vheight, locked_view, committed_height, executed_view, leaf_view) =
+        sqlx::query("select * from hotstuff_state;")
+            .map(|row: MySqlRow| {
+                //     0          1                 2               3               4                 5            6
+                //  | token | current_view  | last_voted_view | locked_view  |  committed_view | executed_view | leaf_view
+                let token: String = row.get(0);
+                let current_view: ViewNumber = row.get(1);
+                let vheight: ViewNumber = row.get(2);
+                let locked_view: ViewNumber = row.get(3);
+                let committed_view: ViewNumber = row.get(4);
+                let executed_view: ViewNumber = row.get(5);
+                let leaf_view: ViewNumber = row.get(6);
+                (
+                    token,
+                    current_view,
+                    vheight,
+                    locked_view,
+                    committed_view,
+                    executed_view,
+                    leaf_view,
+                )
+            })
+            .fetch_one(conn_pool)
+            .await
+            .unwrap();
+
+    let (_, leaf) = get_one_node_by_view(conn_pool, leaf_view).await.unwrap();
+    let (_, b_locked) = get_one_node_by_view(conn_pool, locked_view).await.unwrap();
+    let (_, b_executed) = get_one_node_by_view(conn_pool, executed_view)
+        .await
+        .unwrap();
+
+    let qc_high = Arc::new(leaf.justify().clone());
+
+    let state = InMemoryState {
+        token,
+        leaf,
+        qc_high,
+        vheight,
+        current_view,
+        committed_height,
+        b_executed,
+        b_locked,
+    };
+
+    state
+}
+
+async fn create_tables(conn_pool: &MySqlPool) {
+    conn_pool
+        .execute(
+            "
+        CREATE TABLE IF NOT EXISTS `combined_tc`
+        (
+         `view`          bigint unsigned NOT NULL ,
+         `combined_sign` varchar(128) NOT NULL ,
+        
+        PRIMARY KEY (`view`)
+        );
+        
+        
+        CREATE TABLE IF NOT EXISTS `hotstuff_state`
+        (
+         `token`           varchar(64) NOT NULL ,
+         `current_view`    bigint unsigned NOT NULL ,
+         `last_voted_view` bigint unsigned NOT NULL ,
+         `locked_view`     bigint unsigned NOT NULL ,
+         `committed_view`  bigint unsigned NOT NULL ,
+         `executed_view`   bigint unsigned NOT NULL ,
+         `leaf_view`       bigint NOT NULL ,
+        
+        PRIMARY KEY (`token`)
+        );
+        
+        
+        CREATE TABLE IF NOT EXISTS `partial_tc`
+        (
+         `view`         bigint unsigned NOT NULL ,
+         `partial_sign` varchar(128) NOT NULL ,
+         `replica_id`   varchar(64) NOT NULL ,
+        
+        PRIMARY KEY (`view`, `replica_id`)
+        );
+        
+        CREATE TABLE IF NOT EXISTS `peers`
+        (
+         `replica_id` varchar(64) NOT NULL ,
+         `addr`       varchar(64) NOT NULL ,
+        
+        PRIMARY KEY (`replica_id`)
+        );
+        
+        
+        CREATE TABLE IF NOT EXISTS `hotstuff_conf`
+        (
+         `token`     varchar(64) NOT NULL ,
+         `total`     bigint unsigned NOT NULL ,
+         `self_id`   varchar(64) NOT NULL ,
+         `self_addr` varchar(64) NOT NULL ,
+        
+        PRIMARY KEY (`token`)
+        );
+        
+        
+        CREATE TABLE IF NOT EXISTS `proposal`
+        (
+         `view`         bigint unsigned NOT NULL ,
+         `parent_hash`  varchar(128) NOT NULL ,
+         `justify_view` bigint unsigned NOT NULL ,
+         `prop_hash`    varchar(128) NOT NULL , # 这个proposal本身的hash
+         `txn`          mediumblob NOT NULL ,
+        
+        PRIMARY KEY (`view`)
+        );
+        
+        CREATE TABLE IF NOT EXISTS `qc`
+        (
+         `view`          bigint unsigned NOT NULL ,
+         `node_hash`     varchar(128) NOT NULL , # qc指向的node的哈希
+         `combined_sign` varchar(128) NOT NULL ,
+        
+        PRIMARY KEY (`view`)
+        );
+        ",
+        )
+        .await
+        .unwrap();
+}
+
+async fn drop_tables(conn_pool: &MySqlPool) {
+    conn_pool
+        .execute(
+            "
+            DROP TABLE IF EXISTS `combined_tc`;
+            DROP TABLE IF EXISTS `proposal`;
+            DROP TABLE IF EXISTS `qc`;
+            DROP TABLE IF EXISTS `partial_tc`;
+            DROP TABLE IF EXISTS `hotstuff_state`;
+            DROP TABLE IF EXISTS `peers`;
+            DROP TABLE IF EXISTS `hotstuff_conf`;
+            ",
+        )
+        .await
+        .unwrap();
+}
 pub struct InMemoryState {
+    // Token of the hotstuff system.
+    token: String,
+
     // Leaf is the node with justify=qc-high.
     leaf: Arc<TreeNode>,
 
@@ -40,16 +292,79 @@ pub struct InMemoryState {
     b_locked: Arc<TreeNode>,
 }
 
+/// Persistent storage based on mysql. MySQLStorage promises that:
+/// - It won't lose any proposal with a QuorumCertificate, once received.
+/// - It won't lose any QuorumCertificate and TimeCertificate, once received.
+///
+/// For example , Persistent Stroage keeps `3<-4` in branch `3<-4<-4` and never lose them.
+/// QC carried by the second `4` should be stablized but no guarantees for the second proposal `4` itself.
+pub struct MySQLStorage {
+    pub conn_pool: sqlx::MySqlPool,
+}
+
+impl MySQLStorage {}
+
+pub fn init_in_mem_storage(
+    total: usize,
+    init_node: &TreeNode,
+    init_qc: &GenericQC,
+    self_id: ReplicaID,
+    peers_addr: HashMap<ReplicaID, String>,
+    signaturer: DefaultSignaturer,
+) -> HotstuffStorage {
+    let token = format!("hotstuff_test");
+
+    let conf = HotStuffConfig {
+        token: token.clone(),
+        total,
+        replica_id: self_id,
+        peers_addr,
+    };
+
+    let hss = HotstuffStorage::new(token, init_node, init_qc, conf, signaturer, None);
+    // hss.append_new_node(init_node);
+    hss
+}
+
+pub async fn init_hotstuff_storage(
+    total: usize,
+    self_id: ReplicaID,
+    peers_addr: HashMap<ReplicaID, String>,
+    mysql_addr: &str,
+    signaturer: DefaultSignaturer,
+) -> HotstuffStorage {
+    let conn_pool = MySqlPool::connect(mysql_addr).await.unwrap();
+
+    let token = format!("hotstuff_test");
+    let backend = Some(MySQLStorage { conn_pool });
+
+    let conf = HotStuffConfig {
+        token: token.clone(),
+        total,
+        replica_id: self_id,
+        peers_addr,
+    };
+
+    HotstuffStorage::new(
+        token,
+        &hs_data::INIT_NODE,
+        &hs_data::INIT_QC,
+        conf,
+        signaturer,
+        backend,
+    )
+}
+
 /// HotstuffStorage cache changes in memory and flush dirty data.
 pub struct HotstuffStorage {
-    backend: MysqlStorage,
+    // None for disable MySQL backend.
+    backend: Option<MySQLStorage>,
     state: InMemoryState,
-
     conf: HotStuffConfig,
-
     signaturer: DefaultSignaturer,
+    tc_map: BTreeMap<ViewNumber, HashSet<TimeoutCertificate>>,
 
-    tc_tree: BTreeMap<ViewNumber, HashSet<TimeoutCertificate>>,
+    in_mem_queue: HashMap<NodeHash, Arc<TreeNode>>,
 
     combined_tc_queue: VecDeque<TimeoutCertificate>,
     partial_tc_queue: VecDeque<TimeoutCertificate>,
@@ -61,44 +376,13 @@ pub struct HotstuffStorage {
     justify_queue: VecDeque<GenericQC>,
 }
 
-/// Persistent storage based on mysql. MysqlStorage promises that:
-/// - It won't lose any proposal with a QuorumCertificate, once received.
-/// - It won't lose any QuorumCertificate and TimeCertificate, once received.
-///
-/// For example , Persistent Stroage keeps `3<-4` in branch `3<-4<-4` and never lose them.
-/// QC carried by the second `4` should be stablized but no guarantees for the second proposal `4` itself.
-///
-pub struct MysqlStorage {
-    // A pool for proposals that doesn't form qc.
-    in_mem_queue: HashMap<NodeHash, Arc<TreeNode>>,
-    conn_pool: sqlx::MySqlPool,
-}
-
-impl MysqlStorage {
-    fn get(&self, node_hash: &NodeHash) -> Option<Arc<TreeNode>> {
-        // search cache.
-        match self.in_mem_queue.get(node_hash) {
-            // search table .
-            None => None,
-            Some(s) => Some(s.clone()),
-        }
-    }
-
-    fn insert(&mut self, node_hash: NodeHash, prop: Arc<TreeNode>) {}
-
-    async fn async_flush(&mut self) -> Result<(), sqlx::Error> {
-        // start rx
-        let mut tx = self.conn_pool.begin().await?;
-
-        // flush queues;
-        // flush state
-        tx.commit().await
-    }
-}
-
 pub struct HotStuffConfig {
-    total: usize,
-    peers_addr: HashMap<ReplicaID, String>,
+    // Hotstuff system token.
+    pub token: String,
+    // Peers number.
+    pub total: usize,
+    pub replica_id: ReplicaID,
+    pub peers_addr: HashMap<ReplicaID, String>,
 }
 
 impl HotStuffConfig {
@@ -109,95 +393,222 @@ impl HotStuffConfig {
 
 impl HotstuffStorage {
     pub fn new(
-        view: ViewNumber,
+        token: String,
         init_node: &TreeNode,
         init_qc: &GenericQC,
         conf: HotStuffConfig,
         signaturer: DefaultSignaturer,
+        backend: Option<MySQLStorage>,
     ) -> Self
     where
         Self: Sized,
     {
-        Self {
-            backend: todo!(),
+        let mut storage = Self {
             state: InMemoryState {
-                current_view: view,
-                vheight: view,
+                token,
+                current_view: 0,
+                vheight: 0,
                 committed_height: 0,
                 b_executed: Arc::new(init_node.clone()),
                 b_locked: Arc::new(init_node.clone()),
                 // safety related
                 leaf: Arc::new(init_node.clone()),
-                // height\view of the leaf.
                 qc_high: Arc::new(init_qc.clone()),
             },
+            backend,
             signaturer,
             conf,
+            tc_map: BTreeMap::new(),
+            in_mem_queue: HashMap::new(),
             combined_tc_queue: VecDeque::with_capacity(8),
             partial_tc_queue: VecDeque::with_capacity(8),
             prop_queue: VecDeque::with_capacity(8),
             justify_queue: VecDeque::with_capacity(8),
-            tc_tree: BTreeMap::new(),
+        };
+        storage.append_new_node(init_node);
+        storage
+    }
+
+    pub async fn init(&mut self) {
+        if let Some(backend) = self.backend.as_ref() {
+            drop_tables(&backend.conn_pool).await;
+            create_tables(&backend.conn_pool).await;
         }
     }
 
-    pub async fn async_recover(&mut self) {
+    pub async fn recover(
+        token: String,
+        addr: &str,
+        signaturer: DefaultSignaturer,
+    ) -> HotstuffStorage {
         // refactor
         // load all proposals;
-        let stream = sqlx::query(
+
+        let conn_pool = sqlx::MySqlPool::connect(addr).await.unwrap();
+
+        info!("start recovering");
+
+        let st = SystemTime::now();
+        let conf = recover_hotstuff_config(&conn_pool).await;
+        let mut dur_recover_state = SystemTime::now().duration_since(st).unwrap();
+        info!(
+            "recover hotstuff configuration, took {} ms",
+            dur_recover_state.as_millis()
+        );
+
+        let st_1 = SystemTime::now();
+        let in_mem_queue = sqlx::query(
             "
             select * from proposal inner join qc 
             on proposal.justify_view=qc.view 
             order by proposal.justify_view;
             ",
         )
-        .map(|row: MySqlRow| {
-            //  0       1               2           3          4       5        6               7
-            // view | parent_hash | justify_view | prop_hash | tx | qc.view | qc.node_hash | qc.combined_sign
-            let view: ViewNumber = row.get(0);
-            let parent_hash: String = row.get(1);
-            let justify_view: ViewNumber = row.get(2);
-            let prop_hash: String = row.get(3);
-            let tx: String = row.get(4);
-            let node_hash: String = row.get(6);
-            let combined_sign: String = row.get(7);
-
-            let node = TreeNode {
-                height: view,
-                txs: serde_json::from_str(&tx).unwrap(),
-                parent: NodeHash::from_vec(&base64::decode(&parent_hash).unwrap()),
-                justify: GenericQC::new(
-                    view,
-                    &NodeHash::from_vec(&base64::decode(&prop_hash).unwrap()),
-                    &combined_sign_from_vec_u8(base64::decode(&combined_sign).unwrap()),
-                ),
-            };
-        })
-        .fetch_all(&self.backend.conn_pool)
+        .map(|row: MySqlRow| map_row_to_proposal(row))
+        .fetch_all(&conn_pool)
         .await
-        .unwrap();
+        .unwrap()
+        .into_iter()
+        .collect::<HashMap<NodeHash, Arc<TreeNode>>>();
 
-        // load hotstuff_state
+        dur_recover_state = SystemTime::now().duration_since(st_1).unwrap();
+        info!(
+            "recover in-mem proposal tree, took {} ms",
+            dur_recover_state.as_millis()
+        );
 
-        // load all tc_map;
-    }
+        let st_2 = SystemTime::now();
+        let state = recover_hotstuff_state(&conn_pool).await;
+        dur_recover_state = SystemTime::now().duration_since(st_2).unwrap();
+        info!(
+            "recover in mem hotstuff state, took {} ms",
+            dur_recover_state.as_millis()
+        );
 
-    pub async fn async_flush(&mut self) {
-        match self.backend.async_flush().await {
-            Ok(()) => {
-                debug!("flushed");
-            }
-            Err(e) => {
-                error!("{:?}", e);
-            }
+        let st_3 = SystemTime::now();
+        let tc_map = recover_tc_map(&conn_pool).await;
+        dur_recover_state = SystemTime::now().duration_since(st_3).unwrap();
+        info!(
+            "recover tc mapper, took {} ms",
+            dur_recover_state.as_millis()
+        );
+
+        // update in memory.
+        let end = SystemTime::now();
+        let recover_dur = end.duration_since(st).unwrap();
+
+        info!(
+            "recover done, time consumed: {:.4} s",
+            recover_dur.as_secs_f32(),
+        );
+
+        HotstuffStorage {
+            backend: Some(MySQLStorage { conn_pool }),
+            state,
+            conf,
+            signaturer,
+            tc_map,
+            in_mem_queue,
+            combined_tc_queue: VecDeque::with_capacity(8),
+            partial_tc_queue: VecDeque::with_capacity(8),
+            prop_queue: VecDeque::with_capacity(8),
+            justify_queue: VecDeque::with_capacity(8),
         }
     }
 
-    pub fn block_flush(&mut self) {
-        // refactor
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(self.async_flush());
+    // refactor
+    pub async fn async_flush(&mut self) -> Result<(), sqlx::Error> {
+        if self.backend.is_none() {
+            return Ok(());
+        }
+        // start rx
+
+        let mut tx = self.backend.as_ref().unwrap().conn_pool.begin().await?;
+        // flush proposal queue;
+        while let Some(prop) = self.prop_queue.pop_front() {
+            let view = prop.height();
+            let parent_hash: String = base64::encode(prop.parent_hash());
+            let node_hash = base64::encode(prop.justify().node_hash());
+            let sign = base64::encode(prop.justify().combined_sign().to_bytes());
+            let txn = serde_json::to_string(&prop.tx()).unwrap();
+
+            // Note that previous flush may insert a qc with the same view.
+            sqlx::query(
+                "
+                    insert ignore into qc, 
+                    (view, node_hash, combined_sign)
+                    values
+                    (?, ?, ?)
+                ;",
+            )
+            .bind(view)
+            .bind(&node_hash)
+            .bind(&sign)
+            .execute(&mut tx)
+            .await
+            .unwrap();
+
+            sqlx::query(
+                "
+                    insert into proposal
+                    (view, parent_hash, justify_view, prop_hash, txn)
+                    values
+                    (?, ?, ?, ?, ?)
+                ;",
+            )
+            .bind(view)
+            .bind(&parent_hash)
+            .bind(view)
+            .bind(&node_hash)
+            .bind(&txn)
+            .execute(&mut tx)
+            .await
+            .unwrap();
+        }
+
+        // flush justify queue;
+        while let Some(qc) = self.justify_queue.pop_front() {
+            let view = qc.view();
+            let node_hash = base64::encode(qc.node_hash());
+            let sign = base64::encode(qc.combined_sign().to_bytes());
+
+            // The previous proposal flushing may insert a qc with the same view.
+            sqlx::query(
+                "
+                    insert ignore into qc, 
+                    (view, node_hash, combined_sign)
+                    values
+                    (?, ?, ?)
+                ;",
+            )
+            .bind(view)
+            .bind(&node_hash)
+            .bind(&sign)
+            .execute(&mut tx)
+            .await
+            .unwrap();
+        }
+
+        // flush state
+        sqlx::query(
+            "
+                update hotstuff_state set current_view=?, last_voted_view=?, 
+                locked_view=?, committed_view=?, executed_view=? 
+                where token=?; ",
+        )
+        .bind(self.state.current_view)
+        .bind(self.state.vheight)
+        .bind(self.state.b_locked.height())
+        .bind(self.state.committed_height)
+        .bind(self.state.b_executed.height())
+        .bind(&self.state.token)
+        .execute(&mut tx)
+        .await
+        .unwrap();
+
+        let res = tx.commit().await;
+        info!("flush done. ");
+        res
     }
 
     pub fn threshold(&self) -> usize {
@@ -207,7 +618,7 @@ impl HotstuffStorage {
     fn compress_tc(&mut self) -> Option<ViewNumber> {
         // compress
         let view = self
-            .tc_tree
+            .tc_map
             .iter()
             .filter(|(k, s)| s.len() >= self.conf.threshold())
             .max_by_key(|(k, _)| *k)
@@ -215,7 +626,7 @@ impl HotstuffStorage {
 
         if let Some(v) = view {
             let from = String::default();
-            self.tc_tree
+            self.tc_map
                 .remove(&v)
                 .and_then(|tc| {
                     combine_time_certificates(
@@ -232,12 +643,27 @@ impl HotstuffStorage {
         }
         view
     }
+
+    fn get(&self, node_hash: &NodeHash) -> Option<Arc<TreeNode>> {
+        // refactor
+        match self.in_mem_queue.get(node_hash) {
+            None => None,
+            Some(s) => Some(s.clone()),
+        }
+    }
+
+    fn insert(&mut self, node_hash: NodeHash, prop: Arc<TreeNode>) {
+        self.in_mem_queue.insert(node_hash.clone(), prop.clone());
+        self.prop_queue.push_back(prop);
+    }
 }
 
+#[async_trait::async_trait]
 impl SafetyStorage for HotstuffStorage {
-    fn flush(&mut self) -> hotstuff_rs::safety::machine::Result<()> {
-        self.block_flush();
-        Ok(())
+    async fn flush(&mut self) -> hotstuff_rs::safety::machine::Result<()> {
+        self.async_flush()
+            .await
+            .map_err(|e| hotstuff_rs::safety::machine::SafetyErr::InternalErr(Box::new(e)))
     }
 
     fn append_new_node(&mut self, node: &TreeNode) {
@@ -245,7 +671,7 @@ impl SafetyStorage for HotstuffStorage {
         let node = Arc::new(node.clone());
 
         // Warning: OOM since every node has a replica in memory.
-        self.backend.insert(h, node.clone());
+        self.insert(h, node.clone());
         self.prop_queue.push_back(node);
     }
 
@@ -255,11 +681,11 @@ impl SafetyStorage for HotstuffStorage {
 
     fn find_three_chain(&self, node: &TreeNode) -> Vec<Arc<TreeNode>> {
         let mut chain = Vec::with_capacity(3);
-        if let Some(b3) = self.backend.get(node.justify().node_hash()) {
+        if let Some(b3) = self.get(node.justify().node_hash()) {
             chain.push(b3.clone());
-            if let Some(b2) = self.backend.get(b3.justify().node_hash()) {
+            if let Some(b2) = self.get(b3.justify().node_hash()) {
                 chain.push(b2.clone());
-                if let Some(b1) = self.backend.get(b2.justify().node_hash()) {
+                if let Some(b1) = self.get(b2.justify().node_hash()) {
                     chain.push(b1.clone());
                 }
             }
@@ -271,7 +697,7 @@ impl SafetyStorage for HotstuffStorage {
     fn update_leaf(&mut self, new_leaf: &TreeNode) {
         self.state.vheight = new_leaf.height();
         self.state.leaf = Arc::new(new_leaf.clone());
-        self.backend
+        self.in_mem_queue
             .insert(TreeNode::hash(new_leaf), self.state.leaf.clone());
     }
 
@@ -285,7 +711,7 @@ impl SafetyStorage for HotstuffStorage {
 
     /// qc_high.node == qc_node.
     fn update_qc_high(&mut self, new_qc_node: &TreeNode, new_qc_high: &GenericQC) {
-        if let Some(qc_node) = self.backend.get(self.get_qc_high().node_hash()) {
+        if let Some(qc_node) = self.get(self.get_qc_high().node_hash()) {
             if new_qc_node.height() > qc_node.height() {
                 self.state.qc_high = Arc::new(new_qc_high.clone());
                 // self.vheight = new_qc_node.height();
@@ -306,21 +732,25 @@ impl SafetyStorage for HotstuffStorage {
         // a.height() >= b.height()
         let mut height_now = a.height();
         let mut parent_hash = a.parent_hash().clone();
+
+        // refactor
+        let mut node: Arc<TreeNode> = Arc::new(a.clone());
         while height_now > b.height() {
-            if let Some(prev) = self.backend.get(&parent_hash) {
+            if let Some(prev) = self.get(&parent_hash) {
+                node = prev.clone();
                 height_now = prev.height();
+                // if prev == init_qc, then prev.parent() points to an invalied node.
                 parent_hash = prev.parent_hash().clone();
             } else {
                 break;
             }
         }
-        height_now == b.height() && parent_hash != TreeNode::hash(b)
+
+        TreeNode::hash(node.as_ref()) != TreeNode::hash(b)
     }
 
     fn get_node(&self, node_hash: &NodeHash) -> Option<Arc<TreeNode>> {
-        self.backend
-            .get(node_hash)
-            .and_then(|node| Some(node.clone()))
+        self.get(node_hash).and_then(|node| Some(node.clone()))
     }
 
     fn get_locked_node(&self) -> Arc<TreeNode> {
@@ -417,7 +847,14 @@ impl SafetyStorage for HotstuffStorage {
     }
 }
 
+#[async_trait::async_trait]
 impl LivenessStorage for HotstuffStorage {
+    async fn flush(&mut self) -> Result<(), LivenessStorageErr> {
+        self.async_flush()
+            .await
+            .map_err(|_| LivenessStorageErr::FailedToFlush)
+    }
+
     fn append_tc(&mut self, tc: TimeoutCertificate) -> Result<ViewNumber, LivenessStorageErr> {
         match tc.view_sign() {
             pacemaker::data::SignType::Partial(_) => {
@@ -432,7 +869,7 @@ impl LivenessStorage for HotstuffStorage {
     }
 
     fn is_reach_threshold(&self, view: ViewNumber) -> bool {
-        self.tc_tree
+        self.tc_map
             .get(&view)
             .map_or(false, |s| s.len() >= self.conf.threshold())
     }
@@ -451,26 +888,25 @@ impl LivenessStorage for HotstuffStorage {
         strategy: &BranchSyncStrategy,
     ) -> Result<BranchData, LivenessStorageErr> {
         // refactor
+        // Find proposals in memory through
         match strategy {
             BranchSyncStrategy::Grow {
                 grow_from,
                 batch_size,
             } => {
                 let v: Vec<TreeNode> = self
-                    .backend
                     .in_mem_queue
                     .values()
                     .filter(|s| &s.height() > grow_from)
                     .map(|node| node.as_ref().clone())
                     .collect();
-
                 Ok(BranchData { data: v })
             }
         }
     }
 
     fn is_qc_node_exists(&mut self, qc: &GenericQC) -> bool {
-        self.backend.get(&qc.node_hash()).is_some()
+        self.get(&qc.node_hash()).is_some()
     }
 
     fn get_locked_node(&mut self) -> &TreeNode {

@@ -5,7 +5,7 @@
 //!
 //!
 
-use hs_data::{CombinedSign, SignID, SignKit, TreeNode, PK, SK};
+use hs_data::{CombinedSign, Sign, SignID, SignKit, TreeNode, PK, SK};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -30,6 +30,8 @@ pub trait Signaturer: Send + Sync {
 
     fn validate_qc(&self, qc_node: &TreeNode, combined_sign: &CombinedSign) -> bool;
 }
+
+#[derive(Clone)]
 pub struct DefaultSignaturer {
     sign_id: SignID,
     pks: PK,

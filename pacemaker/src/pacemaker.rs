@@ -256,7 +256,7 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
                 .await?;
             }
             machine::Ready::UpdateQCHigh(_, node) => {
-                if let Err(e) = self.storage.update_qc_high(node.justify()) {
+                if let Err(e) = self.storage.update_qc_high(&node, node.justify()) {
                     error!("{:?}", e);
                 }
             }

@@ -17,10 +17,10 @@ lazy_static! {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TreeNode {
-    height: u64, // height === viewNumber
-    txs: Vec<Txn>,
-    parent: NodeHash,
-    justify: GenericQC,
+    pub height: u64, // height === viewNumber
+    pub txs: Vec<Txn>,
+    pub parent: NodeHash,
+    pub justify: GenericQC,
 }
 
 impl TreeNode {
@@ -118,6 +118,14 @@ pub struct NodeHash(pub [u8; 32]);
 impl NodeHash {
     pub const fn genesis() -> NodeHash {
         NodeHash([0xAB; 32])
+    }
+
+    pub fn from_vec(v: &Vec<u8>) -> NodeHash {
+        let mut buf = [0u8; 32];
+        for (i, b) in v.iter().take(32).enumerate() {
+            buf[i] = *b;
+        }
+        NodeHash(buf)
     }
 }
 

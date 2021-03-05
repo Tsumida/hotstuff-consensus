@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{mem::MaybeUninit, unimplemented, vec};
 
-use hss::InMemoryStorage;
+use hss::{HotStuffConfig, HotstuffStorage, MySQLStorage};
 use log::debug;
 use simplelog::{CombinedLogger, Config, LevelFilter, WriteLogger};
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, Signature, SignatureShare};
@@ -32,19 +32,6 @@ pub(crate) fn init_logger() {
     }
 }
 
-pub(crate) fn threshold_sign_kit(
-    n: usize,
-    t: usize,
-) -> (SecretKeySet, PublicKeySet, Vec<(usize, SecretKeyShare)>) {
-    assert!(t <= n);
-
-    let s = SecretKeySet::random(t, &mut rand::thread_rng());
-
-    let vec_sk = (0..n).map(|i| (i, s.secret_key_share(i))).collect();
-    let pks = s.public_keys();
-    (s, pks, vec_sk)
-}
-
 pub(crate) enum ExpectedState<'a> {
     // for hotstuff status
     LockedAt(String),
@@ -57,8 +44,8 @@ pub(crate) enum ExpectedState<'a> {
 }
 
 pub(crate) struct MockHotStuff {
-    testee: Option<Machine<InMemoryStorage>>,
-
+    testee: Option<Machine<HotstuffStorage>>,
+    token: String,
     pks: Option<PublicKeySet>,
     sk: Option<SecretKeySet>,
     sks: Vec<(usize, SecretKeyShare)>,
@@ -87,6 +74,7 @@ impl MockHotStuff {
 
         Self {
             testee: None,
+            token: format!("test"),
             parent: init_node_hash,
             qc_high: init_qc,
 
@@ -99,7 +87,7 @@ impl MockHotStuff {
             qcs: HashMap::new(),
 
             height: 0,
-            th: 0,
+            th: (n << 1) / 3,
             n,
             leader_id: 0,
             testee_id: 0,
@@ -156,16 +144,37 @@ impl MockHotStuff {
         self.parent = init_node_hash;
         self.qc_high = init_qc;
 
-        let voter = Voter::new(
-            self.th,
-            DefaultSignaturer::new(
-                self.testee_id,
-                self.pks.as_ref().unwrap().clone(),
-                self.sk.as_ref().unwrap().secret_key_share(self.testee_id),
-            ),
+        let signaturer = DefaultSignaturer::new(
+            self.testee_id,
+            self.pks.as_ref().unwrap().clone(),
+            self.sk.as_ref().unwrap().secret_key_share(self.testee_id),
         );
-        let storage = InMemoryStorage::new(view, &init_node, self.qc_high.as_ref());
-        let testee: Machine<InMemoryStorage> = Machine::new(
+        let voter = Voter::new(self.th, signaturer.clone());
+
+        let peer_addr: HashMap<ReplicaID, String> = vec![(
+            format!("replica-{}", self.testee_id),
+            format!("localhost:6666"),
+        )]
+        .into_iter()
+        .collect();
+
+        /*
+        let conf = HotStuffConfig {
+            token: self.token.clone(),
+            total: self.n,
+            replica_id: format!("replica-{}", self.testee_id),
+            peers_addr: peer_addr.clone(),
+        };*/
+
+        let storage = hss::init_in_mem_storage(
+            self.n,
+            &INIT_NODE,
+            &INIT_QC,
+            format!("replica-{}", self.testee_id),
+            peer_addr,
+            signaturer,
+        );
+        let testee: Machine<HotstuffStorage> = Machine::new(
             voter,
             format!("{}", self.testee_id),
             self.n,
@@ -185,6 +194,7 @@ impl MockHotStuff {
     /// For example `a1 <-qc- a2 <-qc- a3`, a1 has 2 qc, a2 has one, but qc of a3 isn't formed.
     pub(crate) fn testee_load_consecutive_proposals(&mut self, cmds: Vec<String>) -> &mut Self {
         let nodes = self.prepare_proposals(&cmds);
+
         for (cmd, (node, hash)) in cmds.into_iter().zip(nodes) {
             // send proposal to testee
             let res = self.testee_recv_honest_proposal(node.as_ref(), node.justify());

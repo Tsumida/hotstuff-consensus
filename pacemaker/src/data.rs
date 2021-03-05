@@ -1,5 +1,10 @@
 //! Datastructure for liveness
 
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
+
 use cryptokit::{DefaultSignaturer, Signaturer};
 use hs_data::msg::Context;
 use hs_data::{CombinedSign, GenericQC, ReplicaID, SignKit, TreeNode, ViewNumber};
@@ -16,6 +21,22 @@ pub struct TimeoutCertificate {
     view: ViewNumber,
     view_sign: SignType,
     qc_high: GenericQC,
+}
+
+impl PartialEq for TimeoutCertificate {
+    fn eq(&self, other: &Self) -> bool {
+        self.view == other.view && self.from == other.from
+    }
+}
+
+impl Eq for TimeoutCertificate {}
+
+impl Hash for TimeoutCertificate {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // view_sign is verified by Signaturear.
+        self.view.hash(state);
+        self.from.hash(state);
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SignType {
@@ -95,7 +116,7 @@ pub fn combine_time_certificates<'a>(
 
     match signaturer.combine_partial_sign(iter_partial_signs) {
         Ok(s) => Some(TimeoutCertificate::compressed(
-            from.clone(),
+            String::default(),
             view,
             *s,
             qc_high,

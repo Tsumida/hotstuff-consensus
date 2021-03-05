@@ -19,3 +19,5 @@ log = ""
 tokio = {version = "1.2", features = ["full"]}
 sqlx = { version = "0.5", features = [ "mysql", "runtime-tokio-rustls" ] }
 futures = {version="0.3"}
+async-trait = ""
+thiserror = ""
