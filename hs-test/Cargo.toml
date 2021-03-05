@@ -11,6 +11,7 @@ hotstuff-rs = {path="../hotstuff-rs"}
 hs-data = {path = "../hs-data"}
 cryptokit = {path = "../cryptokit"}
 hss = {path="../hss"}
+pacemaker = {path="../pacemaker"}
 threshold_crypto = { version = "0.4", git = "https://github.com/poanetwork/threshold_crypto" }
 simplelog = ""
 log = ""

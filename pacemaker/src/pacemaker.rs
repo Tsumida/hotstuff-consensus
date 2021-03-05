@@ -93,7 +93,7 @@ pub struct Pacemaker<S: LivenessStorage + Send + Sync> {
     // pacemaker identifier
     view: ViewNumber,
     id: ReplicaID,
-    elector: crate::elector::RoundRobinLeaderElector,
+    pub elector: crate::elector::RoundRobinLeaderElector,
     // LivenessStorage implementation. May be wrapped by Arc
     storage: S,
 

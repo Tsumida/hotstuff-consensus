@@ -2,7 +2,7 @@
 
 use hs_data::{ReplicaID, ViewNumber};
 
-pub(crate) struct RoundRobinLeaderElector {
+pub struct RoundRobinLeaderElector {
     // next_leader = (this_leader + 1) % peers_nums
     round_mapper: Vec<ReplicaID>,
     view: ViewNumber,

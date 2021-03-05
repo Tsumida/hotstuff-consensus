@@ -291,19 +291,13 @@ pub struct InMemoryState {
     // Last locked proposal.
     b_locked: Arc<TreeNode>,
 }
-
-/// Persistent storage based on mysql. MySQLStorage promises that:
-/// - It won't lose any proposal with a QuorumCertificate, once received.
-/// - It won't lose any QuorumCertificate and TimeCertificate, once received.
-///
-/// For example , Persistent Stroage keeps `3<-4` in branch `3<-4<-4` and never lose them.
-/// QC carried by the second `4` should be stablized but no guarantees for the second proposal `4` itself.
 pub struct MySQLStorage {
     pub conn_pool: sqlx::MySqlPool,
 }
 
 impl MySQLStorage {}
 
+/// Create a HotStuffStorage using in memory storage(Mysql disabled).
 pub fn init_in_mem_storage(
     total: usize,
     init_node: &TreeNode,
@@ -326,7 +320,9 @@ pub fn init_in_mem_storage(
     hss
 }
 
+/// Create a HotStuffStorage with MySQL enabled.
 pub async fn init_hotstuff_storage(
+    token: String,
     total: usize,
     self_id: ReplicaID,
     peers_addr: HashMap<ReplicaID, String>,
@@ -335,7 +331,6 @@ pub async fn init_hotstuff_storage(
 ) -> HotstuffStorage {
     let conn_pool = MySqlPool::connect(mysql_addr).await.unwrap();
 
-    let token = format!("hotstuff_test");
     let backend = Some(MySQLStorage { conn_pool });
 
     let conf = HotStuffConfig {
@@ -355,7 +350,12 @@ pub async fn init_hotstuff_storage(
     )
 }
 
-/// HotstuffStorage cache changes in memory and flush dirty data.
+/// HotstuffStorage is based on mysql and promises that:
+/// - It won't lose any proposal with a QuorumCertificate, once received.
+/// - It won't lose any QuorumCertificate and TimeCertificate, once received.
+///
+/// For example , Persistent Stroage keeps `3<-4` in branch `3<-4<-4` and never lose them.
+/// QC carried by the second `4` should be stablized but no guarantees for the second proposal `4` itself.
 pub struct HotstuffStorage {
     // None for disable MySQL backend.
     backend: Option<MySQLStorage>,
@@ -425,7 +425,7 @@ impl HotstuffStorage {
             prop_queue: VecDeque::with_capacity(8),
             justify_queue: VecDeque::with_capacity(8),
         };
-        storage.append_new_node(init_node);
+        // storage.append_new_node(init_node);
         storage
     }
 
@@ -525,6 +525,7 @@ impl HotstuffStorage {
 
         let mut tx = self.backend.as_ref().unwrap().conn_pool.begin().await?;
         // flush proposal queue;
+        debug!("prop queue size = {}", self.prop_queue.len());
         while let Some(prop) = self.prop_queue.pop_front() {
             let view = prop.height();
             let parent_hash: String = base64::encode(prop.parent_hash());
@@ -535,7 +536,7 @@ impl HotstuffStorage {
             // Note that previous flush may insert a qc with the same view.
             sqlx::query(
                 "
-                    insert ignore into qc, 
+                    insert ignore into qc
                     (view, node_hash, combined_sign)
                     values
                     (?, ?, ?)
@@ -592,16 +593,18 @@ impl HotstuffStorage {
         // flush state
         sqlx::query(
             "
-                update hotstuff_state set current_view=?, last_voted_view=?, 
-                locked_view=?, committed_view=?, executed_view=? 
-                where token=?; ",
+                replace into hotstuff_state 
+                (token, current_view, last_voted_view, locked_view, committed_view, executed_view, leaf_view) 
+                values 
+                (?, ?, ?, ?, ?, ?, ?);",
         )
+        .bind(&self.state.token)
         .bind(self.state.current_view)
         .bind(self.state.vheight)
         .bind(self.state.b_locked.height())
         .bind(self.state.committed_height)
         .bind(self.state.b_executed.height())
-        .bind(&self.state.token)
+        .bind(self.state.leaf.height())
         .execute(&mut tx)
         .await
         .unwrap();
@@ -672,7 +675,6 @@ impl SafetyStorage for HotstuffStorage {
 
         // Warning: OOM since every node has a replica in memory.
         self.insert(h, node.clone());
-        self.prop_queue.push_back(node);
     }
 
     fn append_new_qc(&mut self, qc: &GenericQC) {
