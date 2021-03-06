@@ -21,3 +21,4 @@ sqlx = { version = "0.5", features = [ "mysql", "runtime-tokio-rustls" ] }
 futures = {version="0.3"}
 async-trait = ""
 thiserror = ""
+threshold_crypto = { version = "0.4", git = "https://github.com/poanetwork/threshold_crypto" }

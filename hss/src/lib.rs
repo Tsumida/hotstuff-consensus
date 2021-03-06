@@ -2,7 +2,7 @@
 
 // pub mod sqlite;
 
-use cryptokit::DefaultSignaturer;
+use cryptokit::{DefaultSignaturer, Signaturer};
 use hotstuff_rs::safety::machine::{SafetyStorage, Snapshot};
 use hs_data::*;
 use log::{debug, error, info};
@@ -10,12 +10,15 @@ use pacemaker::{
     data::{combine_time_certificates, BranchData, BranchSyncStrategy, TimeoutCertificate},
     liveness_storage::{LivenessStorage, LivenessStorageErr},
 };
+use serde_json::from_str;
 use sqlx::{mysql::MySqlRow, Executor, MySqlPool, Row};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    convert::TryInto,
     sync::Arc,
     time::SystemTime,
 };
+use threshold_crypto::serde_impl::SerdeSecret;
 
 use thiserror::Error;
 #[derive(Debug, Clone, Error)]
@@ -170,81 +173,112 @@ async fn recover_hotstuff_state(conn_pool: &MySqlPool) -> InMemoryState {
     state
 }
 
+async fn recover_signaturer(conn_pool: &MySqlPool) -> DefaultSignaturer {
+    sqlx::query("select pk_set, sk_share, sk_id from crypto where token = ? limit 1; ")
+        .map(|row: MySqlRow| {
+            let pk_set: String = row.get(0);
+            let sk_share: String = row.get(1);
+            let sk_id: u64 = row.get(2);
+
+            DefaultSignaturer {
+                sign_id: sk_id as usize,
+                pks: serde_json::from_str(&pk_set).unwrap(),
+                sks: serde_json::from_str::<SerdeSecret<SK>>(&sk_share)
+                    .unwrap()
+                    .0,
+            }
+        })
+        .fetch_one(conn_pool)
+        .await
+        .unwrap()
+}
+
 async fn create_tables(conn_pool: &MySqlPool) {
     conn_pool
         .execute(
             "
-        CREATE TABLE IF NOT EXISTS `combined_tc`
-        (
-         `view`          bigint unsigned NOT NULL ,
-         `combined_sign` varchar(128) NOT NULL ,
-        
-        PRIMARY KEY (`view`)
-        );
-        
-        
-        CREATE TABLE IF NOT EXISTS `hotstuff_state`
-        (
-         `token`           varchar(64) NOT NULL ,
-         `current_view`    bigint unsigned NOT NULL ,
-         `last_voted_view` bigint unsigned NOT NULL ,
-         `locked_view`     bigint unsigned NOT NULL ,
-         `committed_view`  bigint unsigned NOT NULL ,
-         `executed_view`   bigint unsigned NOT NULL ,
-         `leaf_view`       bigint NOT NULL ,
-        
-        PRIMARY KEY (`token`)
-        );
-        
-        
-        CREATE TABLE IF NOT EXISTS `partial_tc`
-        (
-         `view`         bigint unsigned NOT NULL ,
-         `partial_sign` varchar(128) NOT NULL ,
-         `replica_id`   varchar(64) NOT NULL ,
-        
-        PRIMARY KEY (`view`, `replica_id`)
-        );
-        
-        CREATE TABLE IF NOT EXISTS `peers`
-        (
-         `replica_id` varchar(64) NOT NULL ,
-         `addr`       varchar(64) NOT NULL ,
-        
-        PRIMARY KEY (`replica_id`)
-        );
-        
-        
-        CREATE TABLE IF NOT EXISTS `hotstuff_conf`
-        (
-         `token`     varchar(64) NOT NULL ,
-         `total`     bigint unsigned NOT NULL ,
-         `self_id`   varchar(64) NOT NULL ,
-         `self_addr` varchar(64) NOT NULL ,
-        
-        PRIMARY KEY (`token`)
-        );
-        
-        
-        CREATE TABLE IF NOT EXISTS `proposal`
-        (
-         `view`         bigint unsigned NOT NULL ,
-         `parent_hash`  varchar(128) NOT NULL ,
-         `justify_view` bigint unsigned NOT NULL ,
-         `prop_hash`    varchar(128) NOT NULL , # 这个proposal本身的hash
-         `txn`          mediumblob NOT NULL ,
-        
-        PRIMARY KEY (`view`)
-        );
-        
-        CREATE TABLE IF NOT EXISTS `qc`
-        (
-         `view`          bigint unsigned NOT NULL ,
-         `node_hash`     varchar(128) NOT NULL , # qc指向的node的哈希
-         `combined_sign` varchar(128) NOT NULL ,
-        
-        PRIMARY KEY (`view`)
-        );
+            CREATE TABLE IF NOT EXISTS `combined_tc`
+            (
+            `view`           bigint unsigned NOT NULL ,
+            `combined_sign`  varchar(512) NOT NULL ,
+
+            PRIMARY KEY (`view`)
+            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+            CREATE TABLE IF NOT EXISTS `crypto`
+            (
+            `token`    varchar(64) NOT NULL ,
+            `pk_set`   blob NOT NULL ,
+            `sk_share` blob NOT NULL ,
+            `sk_id`    bigint NOT NULL ,
+
+            PRIMARY KEY (`token`)
+            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+            CREATE TABLE IF NOT EXISTS `hotstuff_conf`
+            (
+            `token`     varchar(64) NOT NULL ,
+            `total`     bigint unsigned NOT NULL ,
+            `self_addr` varchar(64) NOT NULL ,
+            `self_id`   varchar(64) NOT NULL ,
+
+            PRIMARY KEY (`token`)
+            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+            CREATE TABLE IF NOT EXISTS `hotstuff_state`
+            (
+            `token`           varchar(64) NOT NULL ,
+            `current_view`    bigint unsigned NOT NULL ,
+            `last_voted_view` bigint unsigned NOT NULL ,
+            `locked_view`     bigint unsigned NOT NULL ,
+            `committed_view`  bigint unsigned NOT NULL ,
+            `executed_view`   bigint unsigned NOT NULL ,
+            `leaf_view`       bigint NOT NULL ,
+
+            PRIMARY KEY (`token`)
+            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+            CREATE TABLE IF NOT EXISTS `partial_tc`
+            (
+            `view`         bigint unsigned NOT NULL ,
+            `partial_sign` varchar(512) NOT NULL ,
+            `replica_id`   varchar(64) NOT NULL ,
+
+            PRIMARY KEY (`view`, `replica_id`)
+            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+            CREATE TABLE IF NOT EXISTS `peers`
+            (
+            `replica_id` varchar(64) NOT NULL ,
+            `addr`       varchar(64) NOT NULL ,
+
+            PRIMARY KEY (`replica_id`)
+            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+
+            CREATE TABLE IF NOT EXISTS `proposal`
+            (
+            `view`         bigint unsigned NOT NULL ,
+            `parent_hash`  varchar(128) NOT NULL ,
+            `justify_view` bigint unsigned NOT NULL ,
+            `prop_hash`    varchar(128) NOT NULL ,
+            `txn`          mediumblob NOT NULL ,
+
+            PRIMARY KEY (`view`)
+            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+            CREATE TABLE IF NOT EXISTS `qc`
+            (
+            `view`          bigint unsigned NOT NULL ,
+            `node_hash`     varchar(256) NOT NULL ,
+            `combined_sign` varchar(512) NOT NULL ,
+
+            PRIMARY KEY (`view`)
+            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         ",
         )
         .await
@@ -262,6 +296,7 @@ async fn drop_tables(conn_pool: &MySqlPool) {
             DROP TABLE IF EXISTS `hotstuff_state`;
             DROP TABLE IF EXISTS `peers`;
             DROP TABLE IF EXISTS `hotstuff_conf`;
+            DROP TABLE IF EXISTS `crypto`;
             ",
         )
         .await
@@ -405,7 +440,7 @@ impl HotstuffStorage {
     where
         Self: Sized,
     {
-        let mut storage = Self {
+        let storage = Self {
             state: InMemoryState {
                 token,
                 current_view: 0,
@@ -432,17 +467,57 @@ impl HotstuffStorage {
     }
 
     pub async fn init(&mut self) {
-        if let Some(backend) = self.backend.as_ref() {
-            drop_tables(&backend.conn_pool).await;
-            create_tables(&backend.conn_pool).await;
+        if self.backend.as_ref().is_none() {
+            return;
         }
+
+        let backend = self.backend.as_ref().unwrap();
+        drop_tables(&backend.conn_pool).await;
+        create_tables(&backend.conn_pool).await;
+        let mut tx = backend.conn_pool.begin().await.unwrap();
+
+        // init peers
+        for (id, peers) in &self.conf.peers_addr {
+            sqlx::query("insert into peers (replica_id, addr) values (?, ?); ")
+                .bind(id)
+                .bind(peers)
+                .execute(&mut tx)
+                .await
+                .unwrap();
+        }
+
+        // init conf
+        sqlx::query(
+            "insert into hotstuff_conf (token, total, self_addr, self_id) values (?, ?, ?, ?);",
+        )
+        .bind(&self.conf.token)
+        .bind(self.conf.total as u64)
+        .bind(self.conf.peers_addr.get(&self.conf.replica_id).unwrap())
+        .bind(&self.conf.replica_id)
+        .execute(&mut tx)
+        .await
+        .unwrap();
+
+        // refactor
+        let pk_set = serde_json::to_string(&self.signaturer.pks).unwrap();
+        let sk_share: SerdeSecret<SK> = SerdeSecret(self.signaturer.sks.clone());
+        let encoded_sks = serde_json::to_string(&sk_share).unwrap();
+        debug!("pk set size = {} Byte", pk_set.len());
+
+        // init crypto
+        sqlx::query("insert into crypto (token, pk_set, sk_share, sk_id) values (?, ?, ?, ?);")
+            .bind(&self.conf.token)
+            .bind(&pk_set)
+            .bind(&encoded_sks)
+            .bind(self.signaturer.sign_id() as u64)
+            .execute(&mut tx)
+            .await
+            .unwrap();
+
+        tx.commit().await.unwrap();
     }
 
-    pub async fn recover(
-        token: String,
-        addr: &str,
-        signaturer: DefaultSignaturer,
-    ) -> HotstuffStorage {
+    pub async fn recover(token: String, addr: &str) -> HotstuffStorage {
         // refactor
         // load all proposals;
 
@@ -492,6 +567,15 @@ impl HotstuffStorage {
         dur_recover_state = SystemTime::now().duration_since(st_3).unwrap();
         info!(
             "recover tc mapper, took {} ms",
+            dur_recover_state.as_millis()
+        );
+
+        // recover crypto
+        let st_4 = SystemTime::now();
+        let signaturer = recover_signaturer(&conn_pool).await;
+        dur_recover_state = SystemTime::now().duration_since(st_4).unwrap();
+        info!(
+            "recover signaturer, took {} ms",
             dur_recover_state.as_millis()
         );
 

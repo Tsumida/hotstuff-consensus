@@ -5,7 +5,6 @@ use std::{mem::MaybeUninit, unimplemented, vec};
 
 use hss::{HotStuffConfig, HotstuffStorage, MySQLStorage};
 use log::debug;
-use simplelog::{CombinedLogger, Config, LevelFilter, WriteLogger};
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, Signature, SignatureShare};
 
 use cryptokit::DefaultSignaturer;
@@ -17,20 +16,6 @@ use hotstuff_rs::safety::{
 };
 use hs_data::msg::Context;
 
-const DEBUG_MODE: bool = false;
-
-pub(crate) fn init_logger() {
-    if DEBUG_MODE {
-        let _ = CombinedLogger::init(vec![
-            //TermLogger::new(LevelFilter::Debug, Config::default(), TerminalMode::Mixed),
-            WriteLogger::new(
-                LevelFilter::Debug,
-                Config::default(),
-                std::fs::File::create("./test-output/my_rust_bin.log").unwrap(),
-            ),
-        ]);
-    }
-}
 
 pub(crate) enum ExpectedState<'a> {
     // for hotstuff status

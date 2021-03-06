@@ -512,6 +512,7 @@ dependencies = [
  "simplelog",
  "sqlx",
  "thiserror",
+ "threshold_crypto",
  "tokio",
 ]
 

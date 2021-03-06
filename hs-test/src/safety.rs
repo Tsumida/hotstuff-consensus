@@ -3,7 +3,10 @@
 
 #[cfg(test)]
 mod test {
-    use super::super::mocker_hotstuff::{init_logger, ExpectedState, MockEvent, MockHotStuff};
+    use crate::{
+        mocker_hotstuff::{ExpectedState, MockEvent, MockHotStuff},
+        utils::init_logger,
+    };
     use hotstuff_rs::safety::machine::{Ready, SafetyErr, SafetyEvent};
     use hs_data::msg::Context;
 

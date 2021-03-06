@@ -25,3 +25,25 @@ pub fn combined_sign_from_vec_u8(v: Vec<u8>) -> CombinedSign {
     let buf: [u8; 96] = v.try_into().unwrap();
     CombinedSign::from_bytes(buf).unwrap()
 }
+
+#[test]
+#[ignore = "tested"]
+fn type_size() {
+    macro_rules! type_sizes {
+        ($x:ty, $($y:ty), +) => {
+
+            type_sizes!($x);
+            type_sizes!($($y),+);
+        };
+
+        ($x:ty) => {
+            println!(
+                "size of {} is {} Byte",
+                stringify!($x),
+                std::mem::size_of::<$x>()
+            );
+        }
+    }
+
+    type_sizes!(PK, SK, Sign, CombinedSign, GenericQC);
+}

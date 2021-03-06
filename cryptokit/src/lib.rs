@@ -33,9 +33,9 @@ pub trait Signaturer: Send + Sync {
 
 #[derive(Clone)]
 pub struct DefaultSignaturer {
-    sign_id: SignID,
-    pks: PK,
-    sks: SK,
+    pub sign_id: SignID,
+    pub pks: PK,
+    pub sks: SK,
 }
 
 impl DefaultSignaturer {

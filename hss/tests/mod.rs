@@ -6,8 +6,8 @@ mod hss_test {
     use cryptokit::DefaultSignaturer;
     use hotstuff_rs::safety::machine::SafetyStorage;
     use hs_data::{
-        combined_sign_from_vec_u8, threshold_sign_kit, CombinedSign, GenericQC, NodeHash, Sign,
-        TreeNode, Txn, INIT_NODE, INIT_NODE_HASH, PK, SK,
+        threshold_sign_kit, CombinedSign, GenericQC, NodeHash, Sign, TreeNode, Txn, INIT_NODE,
+        INIT_NODE_HASH, PK, SK,
     };
     use hss::HotstuffStorage;
     use std::future::Future;
@@ -40,6 +40,13 @@ mod hss_test {
 
         let signaturer = DefaultSignaturer::new(id, pks.clone(), sks.secret_key_share(id));
         hss::init_hotstuff_storage(token, total, self_id, peers_addr, mysql_addr, signaturer)
+    }
+
+    fn recover_hss_with_mysql_enabled(
+        token: String,
+        mysql_addr: &'static str,
+    ) -> impl Future<Output = HotstuffStorage> {
+        hss::HotstuffStorage::recover(token, mysql_addr)
     }
 
     fn form_combined_sign(node: &TreeNode, sks: &Vec<(usize, SK)>, pks: &PK) -> CombinedSign {
@@ -75,7 +82,7 @@ mod hss_test {
         v
     }
 
-    async fn test_flush() {
+    async fn test_init_and_recover() {
         //
         //  Test:
         //      Flush all dirty data into MySQL.
@@ -86,6 +93,8 @@ mod hss_test {
             "mysql://root:helloworld@localhost:3306/hotstuff_test_mocker",
         )
         .await;
+
+        // drop and then create tables;
         hss.init().await;
 
         let (_, pk_set, vec_sks) = threshold_sign_kit(4, 2);
@@ -96,24 +105,39 @@ mod hss_test {
                 "Suddenly, a rabbit in a dress and a pocket watch ran past Alice.",
                 "As the rabbit ran, he looked at his pocket watch and said, \"Late, late!\"",
                 "Curious, Alice got up to chase the strange rabbit",
+                "Alice followed the rabbit into a hole in the tree. ",
+                "On a table in the tree hole, Alice saw a bottle. There is a label \"Drink Me\" on the bottle", 
             ],
             &vec_sks,
             &pk_set,
         );
 
-        for (_, node) in &chain {
+        for (_, node) in &chain[..4] {
             println!("{}", node.height());
             hss.append_new_node(node);
         }
 
         hss.async_flush().await.unwrap();
+
+        drop(hss);
+
+        let mut hss2 = hss_with_mysql_enabled(
+            format!("test"),
+            "mysql://root:helloworld@localhost:3306/hotstuff_test_mocker",
+        )
+        .await;
+
+        for (_, node) in &chain[4..] {
+            println!("{}", node.height());
+            hss2.append_new_node(node);
+        }
     }
 
     #[test]
-    fn test_hss_flush() {
+    fn test_hss_init_and_recover() {
         init_logger();
         tokio::runtime::Runtime::new()
             .unwrap()
-            .block_on(test_flush());
+            .block_on(test_init_and_recover());
     }
 }
