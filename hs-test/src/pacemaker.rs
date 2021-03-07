@@ -4,10 +4,11 @@ mod test {
     use cryptokit::DefaultSignaturer;
     use hotstuff_rs::safety::{machine::Machine, voter::Voter};
     use hs_data::{
-        form_chain, msg::Context, threshold_sign_kit, ReplicaID, INIT_NODE, INIT_NODE_HASH, SK,
+        form_chain, msg::Context, threshold_sign_kit, ReplicaID, TreeNode, INIT_NODE,
+        INIT_NODE_HASH, SK,
     };
     use hss::HotstuffStorage;
-    use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
+    use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
     use threshold_crypto::{PublicKeySet, SecretKeySet};
 
     use pacemaker::{
@@ -38,6 +39,40 @@ mod test {
         sks: SecretKeySet,
         pks: PublicKeySet,
         vec_sks: Vec<(usize, SK)>,
+    }
+
+    impl MockerNetwork {
+        async fn propose_all<'a>(
+            &mut self,
+            from: String,
+            props: impl IntoIterator<Item = &'a TreeNode>,
+        ) {
+            for prop in props.into_iter() {
+                self.pe_sender
+                    .send(PeerEvent::NewProposal {
+                        ctx: Context {
+                            view: prop.height(),
+                            from: from.clone(),
+                        },
+                        prop: Box::new(prop.clone()),
+                    })
+                    .await
+                    .unwrap();
+            }
+        }
+
+        /// Verify each PeerEvent and return false once meet a event with `v(&event) == false`.
+        async fn vertify_output_sequence(&mut self, v: impl Fn(&PeerEvent) -> bool) -> bool {
+            let mut flag = true;
+            while let Some(ready) = self.pe_recvr.recv().await {
+                flag &= v(&ready);
+                if !flag {
+                    break;
+                }
+            }
+
+            flag
+        }
     }
 
     async fn new_mocker_with_mysql_enabled(
@@ -107,6 +142,23 @@ mod test {
         )
     }
 
+    async fn spawn_pm() -> (
+        MockerNetwork,
+        tokio::sync::mpsc::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (mpm, mut pm) =
+            new_mocker_with_mysql_enabled(4, format!("test"), crate::utils::TEST_MYSQL_ADDR).await;
+
+        let (quit_sender, quit_ch) = tokio::sync::mpsc::channel(1);
+
+        let handler = tokio::spawn(async move {
+            pm.run(quit_ch).await.unwrap();
+        });
+
+        (mpm, quit_sender, handler)
+    }
+
     #[test]
     fn test_bootstrap() {
         //
@@ -118,52 +170,30 @@ mod test {
         //         <-------   <--------
         //        PE(Accept)  Ready(Sign)
         //
-        // Disable branch sync
 
         init_pm_logger("./test-output/test-bootstrap.log");
 
         tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(async move {
-                let (mut mpm, mut pm) = new_mocker_with_mysql_enabled(
-                    4,
-                    format!("test"),
-                    crate::utils::TEST_MYSQL_ADDR,
-                )
-                .await;
-
-                let (quit_sender, quit_ch) = tokio::sync::mpsc::channel(1);
-
-                let handler = tokio::spawn(async move {
-                    pm.run(quit_ch).await.unwrap();
-                });
+                let (mut mpm, quit_sender, handler) = spawn_pm().await;
 
                 let chain = form_chain(TX.iter().take(4).map(|s| *s), &mpm.vec_sks, &mpm.pks);
                 let from = format!("replica-1");
-                for (_, prop) in chain {
-                    mpm.pe_sender
-                        .send(PeerEvent::NewProposal {
-                            ctx: Context {
-                                view: prop.height(),
-                                from: from.clone(),
-                            },
-                            prop: Box::new(prop),
-                        })
-                        .await
-                        .unwrap();
-                }
+
+                mpm.propose_all(from, chain.iter().map(|(_, p)| p)).await;
 
                 quit_sender.send(()).await.unwrap();
 
-                // verify
-                let mut flag = true;
-                while let Some(ready) = mpm.pe_recvr.recv().await {
-                    if let PeerEvent::AcceptProposal { .. } = ready {
-                    } else {
-                        flag = false;
-                        break;
-                    }
-                }
+                let flag = mpm
+                    .vertify_output_sequence(|event| {
+                        if let PeerEvent::AcceptProposal { .. } = event {
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .await;
 
                 handler.await.unwrap();
                 assert!(flag);
@@ -171,8 +201,10 @@ mod test {
     }
 
     #[test]
+    #[ignore = "unimpl"]
     fn test_local_timeout() {}
 
     #[test]
+    #[ignore = "unimpl"]
     fn test_branch_sync() {}
 }

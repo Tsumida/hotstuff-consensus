@@ -14,6 +14,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+    - uses: samin/mysql-action@v1
+      with:
+        mysql version: '8.0' # Optional, default value is "latest". The version of the MySQL
+        mysql database: 'hotstuff_test_mocker' # Optional, default value is "test". The specified database which will be create
+        mysql root password: 'helloworld' # Required if "mysql user" is empty, default is empty. The root superuser password
     - uses: actions/checkout@v1
     - name: Build
       working-directory: ./hs-test

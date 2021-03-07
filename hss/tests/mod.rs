@@ -39,7 +39,16 @@ mod hss_test {
         .collect();
 
         let signaturer = DefaultSignaturer::new(id, pks.clone(), sks.secret_key_share(id));
-        hss::init_hotstuff_storage(token, total, self_id, peers_addr, mysql_addr, signaturer)
+        hss::init_hotstuff_storage(
+            token,
+            total,
+            &INIT_NODE,
+            &INIT_NODE_HASH,
+            self_id,
+            peers_addr,
+            mysql_addr,
+            signaturer,
+        )
     }
 
     fn recover_hss_with_mysql_enabled(
