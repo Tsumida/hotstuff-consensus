@@ -22,7 +22,7 @@ mod test {
         // 2. propose b1, b2
         // 3. propose a4, commmit a1, lock a2
 
-        init_logger();
+        init_logger("./test-output/competitive_branchs.log");
 
         let n = 4;
         let leader = 0;
@@ -66,7 +66,7 @@ mod test {
         let testee = 1;
         let mut mhs = MockHotStuff::new(n);
 
-        init_logger();
+        init_logger("./test-output/consecutive_commit.log");
 
         mhs.specify_leader(leader).specify_testee(testee).init();
 
@@ -100,7 +100,7 @@ mod test {
         let adversial = leader;
         let mut mhs = MockHotStuff::new(n);
 
-        init_logger();
+        init_logger("./test-output/propose_with_corrupted_qc.log");
 
         mhs.specify_leader(leader)
             .specify_testee(testee)
@@ -140,7 +140,7 @@ mod test {
         let testee = 0;
         let mut mhs = MockHotStuff::new(n);
 
-        init_logger();
+        init_logger("./test-output/new_proposal.log");
 
         mhs.specify_leader(leader).specify_testee(testee).init();
 
@@ -185,7 +185,7 @@ mod test {
         let adversial = 1;
         let mut mhs = MockHotStuff::new(n);
 
-        init_logger();
+        init_logger("./test-output/corrupted_new_view_msg.log");
 
         mhs.specify_leader(leader)
             .specify_testee(testee)
@@ -231,7 +231,7 @@ mod test {
         let adversial = 1;
         let mut mhs = MockHotStuff::new(n);
 
-        init_logger();
+        init_logger("./test-output/corrupted_vote.log");
 
         mhs.specify_leader(leader)
             .specify_testee(testee)
@@ -278,7 +278,7 @@ mod test {
         let adversial = 1;
         let mut mhs = MockHotStuff::new(n);
 
-        init_logger();
+        init_logger("./test-output/sync_state.log");
 
         mhs.specify_leader(leader)
             .specify_testee(testee)

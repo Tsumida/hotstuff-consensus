@@ -26,3 +26,6 @@ jobs:
     - name: Run hotstuff tests
       working-directory: ./hs-test
       run: cargo test 
+    - name: Run hss tests
+      working-directory: ./hss
+      run: cargo test

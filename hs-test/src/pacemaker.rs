@@ -18,7 +18,7 @@ mod test {
         pacemaker::{Pacemaker, TchanR, TchanS},
     };
 
-    use crate::utils::init_pm_logger;
+    use crate::utils::init_logger;
 
     static TX: &'static [&'static str] = &[
         "One summer afternoon",
@@ -171,7 +171,7 @@ mod test {
         //        PE(Accept)  Ready(Sign)
         //
 
-        init_pm_logger("./test-output/test-bootstrap.log");
+        init_logger("./test-output/test-bootstrap.log");
 
         tokio::runtime::Runtime::new()
             .unwrap()
