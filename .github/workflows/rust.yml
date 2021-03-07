@@ -13,12 +13,18 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: hotstuff_test_mocker
+          MYSQL_ROOT_PASSWORD: helloworld
+        ports:
+          - 3306
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+
     steps:
-    - uses: samin/mysql-action@v1
-      with:
-        mysql version: '8.0' # Optional, default value is "latest". The version of the MySQL
-        mysql database: 'hotstuff_test_mocker' # Optional, default value is "test". The specified database which will be create
-        mysql root password: 'helloworld' # Required if "mysql user" is empty, default is empty. The root superuser password
     - uses: actions/checkout@v1
     - name: Build
       working-directory: ./hs-test
@@ -26,6 +32,8 @@ jobs:
     - name: Run hotstuff tests
       working-directory: ./hs-test
       run: cargo test 
+      env:
+        DB_PORT: 3306
     - name: Run hss tests
       working-directory: ./hss
       run: cargo test
