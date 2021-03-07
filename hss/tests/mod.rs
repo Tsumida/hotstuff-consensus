@@ -6,8 +6,8 @@ mod hss_test {
     use cryptokit::DefaultSignaturer;
     use hotstuff_rs::safety::machine::SafetyStorage;
     use hs_data::{
-        threshold_sign_kit, CombinedSign, GenericQC, NodeHash, Sign, TreeNode, Txn, INIT_NODE,
-        INIT_NODE_HASH, PK, SK,
+        form_chain, threshold_sign_kit, CombinedSign, GenericQC, NodeHash, Sign, TreeNode, Txn,
+        INIT_NODE, INIT_NODE_HASH, PK, SK,
     };
     use hss::HotstuffStorage;
     use std::future::Future;
@@ -47,39 +47,6 @@ mod hss_test {
         mysql_addr: &'static str,
     ) -> impl Future<Output = HotstuffStorage> {
         hss::HotstuffStorage::recover(token, mysql_addr)
-    }
-
-    fn form_combined_sign(node: &TreeNode, sks: &Vec<(usize, SK)>, pks: &PK) -> CombinedSign {
-        let node_bytes = node.to_be_bytes();
-        let signs = sks
-            .iter()
-            .map(|(i, sk)| (*i, sk.sign(&node_bytes)))
-            .collect::<Vec<(usize, Sign)>>();
-        pks.combine_signatures(signs.iter().map(|(i, s)| (*i, s)))
-            .unwrap()
-    }
-
-    fn form_chain(
-        txn: Vec<&'static str>,
-        vec_sks: &Vec<(usize, SK)>,
-        pk_set: &PK,
-    ) -> Vec<(NodeHash, TreeNode)> {
-        let mut v = vec![];
-        let mut height = 0;
-        let mut parent_hash = INIT_NODE_HASH.clone();
-        let mut parent_node = INIT_NODE.clone();
-        for tx in txn {
-            let combined_sign = form_combined_sign(&parent_node, vec_sks, pk_set);
-            let justify = GenericQC::new(height, &parent_hash, &combined_sign);
-            let (node, hash) =
-                TreeNode::node_and_hash(vec![&Txn::new(tx)], height + 1, &parent_hash, &justify);
-            v.push((hash.as_ref().clone(), node.as_ref().clone()));
-
-            height += 1;
-            parent_hash = *hash;
-            parent_node = *node;
-        }
-        v
     }
 
     async fn test_init_and_recover() {

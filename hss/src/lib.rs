@@ -10,11 +10,9 @@ use pacemaker::{
     data::{combine_time_certificates, BranchData, BranchSyncStrategy, TimeoutCertificate},
     liveness_storage::{LivenessStorage, LivenessStorageErr},
 };
-use serde_json::from_str;
 use sqlx::{mysql::MySqlRow, Executor, MySqlPool, Row};
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    convert::TryInto,
     sync::Arc,
     time::SystemTime,
 };
@@ -361,6 +359,8 @@ pub fn init_in_mem_storage(
 pub async fn init_hotstuff_storage(
     token: String,
     total: usize,
+    init_node: &TreeNode,
+    init_node_hash: &NodeHash,
     self_id: ReplicaID,
     peers_addr: HashMap<ReplicaID, String>,
     mysql_addr: &str,
@@ -377,14 +377,18 @@ pub async fn init_hotstuff_storage(
         peers_addr,
     };
 
-    HotstuffStorage::new(
+    let mut hss = HotstuffStorage::new(
         token,
         &hs_data::INIT_NODE,
         &hs_data::INIT_QC,
         conf,
         signaturer,
         backend,
-    )
+    );
+    hss.init().await;
+    hss.in_mem_queue
+        .insert(init_node_hash.clone(), Arc::new(init_node.clone()));
+    hss
 }
 
 /// HotstuffStorage is based on mysql and promises that:
@@ -411,6 +415,8 @@ pub struct HotstuffStorage {
     /// the second 4's qc should be appended into justify_queue.
     prop_queue: VecDeque<Arc<TreeNode>>,
     justify_queue: VecDeque<GenericQC>,
+
+    dirty: bool,
 }
 
 pub struct HotStuffConfig {
@@ -461,6 +467,7 @@ impl HotstuffStorage {
             partial_tc_queue: VecDeque::with_capacity(8),
             prop_queue: VecDeque::with_capacity(8),
             justify_queue: VecDeque::with_capacity(8),
+            dirty: false,
         };
         // storage.append_new_node(init_node);
         storage
@@ -599,14 +606,16 @@ impl HotstuffStorage {
             partial_tc_queue: VecDeque::with_capacity(8),
             prop_queue: VecDeque::with_capacity(8),
             justify_queue: VecDeque::with_capacity(8),
+            dirty: false,
         }
     }
 
     // refactor
     pub async fn async_flush(&mut self) -> Result<(), sqlx::Error> {
-        if self.backend.is_none() {
+        if self.backend.is_none() || !self.dirty {
             return Ok(());
         }
+
         // start rx
 
         let mut tx = self.backend.as_ref().unwrap().conn_pool.begin().await?;
@@ -697,6 +706,7 @@ impl HotstuffStorage {
 
         let res = tx.commit().await;
         info!("flush done. ");
+        self.reset_dirty();
         res
     }
 
@@ -745,6 +755,16 @@ impl HotstuffStorage {
         self.in_mem_queue.insert(node_hash.clone(), prop.clone());
         self.prop_queue.push_back(prop);
     }
+
+    #[inline]
+    fn set_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    #[inline]
+    fn reset_dirty(&mut self) {
+        self.dirty = false;
+    }
 }
 
 #[async_trait::async_trait]
@@ -761,10 +781,12 @@ impl SafetyStorage for HotstuffStorage {
 
         // Warning: OOM since every node has a replica in memory.
         self.insert(h, node);
+        self.set_dirty();
     }
 
     fn append_new_qc(&mut self, qc: &GenericQC) {
         self.justify_queue.push_back(qc.clone());
+        self.set_dirty();
     }
 
     fn find_three_chain(&self, node: &TreeNode) -> Vec<Arc<TreeNode>> {
@@ -787,6 +809,7 @@ impl SafetyStorage for HotstuffStorage {
         self.state.leaf = Arc::new(new_leaf.clone());
         self.in_mem_queue
             .insert(TreeNode::hash(new_leaf), self.state.leaf.clone());
+        self.set_dirty();
     }
 
     fn get_leaf(&self) -> Arc<TreeNode> {
@@ -806,6 +829,7 @@ impl SafetyStorage for HotstuffStorage {
                 self.update_leaf(new_qc_node);
 
                 debug!("update qc-high(h={})", new_qc_node.height());
+                self.set_dirty();
             }
         }
     }
@@ -849,6 +873,7 @@ impl SafetyStorage for HotstuffStorage {
     fn update_locked_node(&mut self, node: &TreeNode) {
         debug!("locked at node with height {}", node.height());
         self.state.b_locked = Arc::new(node.clone());
+        self.set_dirty();
     }
 
     fn get_last_executed(&self) -> Arc<TreeNode> {
@@ -858,6 +883,7 @@ impl SafetyStorage for HotstuffStorage {
     // Persistent
     fn update_last_executed_node(&mut self, node: &TreeNode) {
         self.state.b_executed = Arc::new(node.clone());
+        self.set_dirty();
     }
 
     fn get_view(&self) -> ViewNumber {
@@ -867,6 +893,7 @@ impl SafetyStorage for HotstuffStorage {
     // Persistent
     fn increase_view(&mut self, new_view: ViewNumber) {
         self.state.current_view = ViewNumber::max(self.state.current_view, new_view);
+        self.set_dirty();
     }
 
     fn is_consecutive_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool {
@@ -901,6 +928,8 @@ impl SafetyStorage for HotstuffStorage {
     fn update_vheight(&mut self, vheight: ViewNumber) -> ViewNumber {
         let prev = self.state.vheight;
         self.state.vheight = ViewNumber::max(self.state.vheight, vheight);
+        self.set_dirty();
+
         prev
     }
 
@@ -916,6 +945,7 @@ impl SafetyStorage for HotstuffStorage {
             self.state.committed_height = h;
         }
         self.state.b_executed = Arc::new(to_commit.clone());
+        self.set_dirty();
 
         info!(
             "commit new proposal, committed_height = {}",
@@ -952,6 +982,8 @@ impl LivenessStorage for HotstuffStorage {
                 self.combined_tc_queue.push_back(tc);
             }
         }
+        self.set_dirty();
+
         // current_view - 1 is ok
         Ok(self.compress_tc().unwrap_or(self.get_view() - 1))
     }
@@ -968,6 +1000,8 @@ impl LivenessStorage for HotstuffStorage {
         qc: &GenericQC,
     ) -> Result<(), LivenessStorageErr> {
         <HotstuffStorage as SafetyStorage>::update_qc_high(self, node, qc);
+        self.set_dirty();
+
         Ok(())
     }
 

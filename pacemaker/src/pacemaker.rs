@@ -1,17 +1,19 @@
 use crate::{
     data::{BranchSyncStrategy, PeerEvent, SyncStatus},
+    elector::RoundRobinLeaderElector,
     timer::{DefaultTimer, TimeoutEvent},
 };
 use crate::{liveness_storage::LivenessStorage, network::NetworkAdaptor};
-use hotstuff_rs::safety::machine::{self, Safety, SafetyEvent, SafetyStorage};
+use hotstuff_rs::safety::machine::{self, Machine, Ready, Safety, SafetyEvent, SafetyStorage};
 use hs_data::{msg::Context, ReplicaID, ViewNumber};
 use std::{
-    collections::BinaryHeap,
+    collections::{BinaryHeap, VecDeque},
     io,
     sync::{
         atomic::{AtomicU8, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
 use log::{error, info};
@@ -26,6 +28,7 @@ pub type CtlSender = tokio::sync::broadcast::Sender<()>;
 const SYNC_SYNCHRONIZING: u8 = 0;
 const SYNC_IDLE: u8 = 1;
 
+const DEFAULT_FLUSH_INTERVAL: u64 = 500;
 static BATCH_SIZE: usize = 8;
 
 // TODO
@@ -89,18 +92,22 @@ fn test_pending_prop() {
     assert!(-2 == pending_prop.pop().unwrap().view);
 }
 
-pub struct Pacemaker<S: LivenessStorage + Send + Sync> {
+// refactor: Separate SafetyStorage & LivenessStorage
+pub struct Pacemaker<S>
+where
+    S: SafetyStorage + LivenessStorage + Send + Sync,
+{
     // pacemaker identifier
     view: ViewNumber,
     id: ReplicaID,
     pub elector: crate::elector::RoundRobinLeaderElector,
-    // LivenessStorage implementation. May be wrapped by Arc
-    storage: S,
 
-    sync_state: Arc<AtomicU8>,
+    machine: Machine<S>,
+    ready_queue: VecDeque<Ready>,
     pending_prop: BinaryHeap<SafetyEventWrapper>,
 
-    machine_adaptor: AsyncMachineAdaptor,
+    pub sync_state: Arc<AtomicU8>,
+
     net_adaptor: NetworkAdaptor,
 
     timer: DefaultTimer,
@@ -108,18 +115,54 @@ pub struct Pacemaker<S: LivenessStorage + Send + Sync> {
 }
 
 /// Leader elector using round-robin algorithm.
-impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
+impl<S> Pacemaker<S>
+where
+    S: SafetyStorage + LivenessStorage + Send + Sync,
+{
+    pub fn new(
+        id: ReplicaID,
+        elector: RoundRobinLeaderElector,
+        machine: Machine<S>,
+        net_adaptor: NetworkAdaptor,
+    ) -> Pacemaker<S>
+    where
+        Self: Sized,
+    {
+        let (notifier, timeout_ch) = tokio::sync::mpsc::channel(1);
+        let max_view_timeout = 60_000;
+        let rtt = 10_000;
+        let timer = DefaultTimer::new(notifier, max_view_timeout, rtt);
+
+        Self {
+            view: 0,
+            id,
+            elector,
+            sync_state: Arc::new(AtomicU8::new(SYNC_IDLE)),
+            pending_prop: BinaryHeap::with_capacity(8),
+            net_adaptor,
+            timer,
+            timeout_ch,
+            machine,
+            ready_queue: VecDeque::with_capacity(8),
+        }
+    }
+
+    /// Start processing events. Stop once received signal from `quit_ch`.
     pub async fn run(&mut self, mut quit_ch: TchanR<()>) -> io::Result<()> {
         info!("pacemaker up");
         let mut quit = false;
 
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        interval.tick().await;
+
         loop {
             tokio::select! {
+                _ = interval.tick() => {
+                    // refactor
+                    LivenessStorage::flush(self.liveness_storage()).await.unwrap();
+                },
                 Some(()) = quit_ch.recv() => {
                     quit = true;
-                },
-                Some(ready) = self.machine_adaptor.ready().recv() => {
-                    self.process_ready_event(ready).await?;
                 },
                 Some(net_event) = self.net_adaptor.event_recvr.recv() => {
                     self.process_network_event(net_event).await?;
@@ -132,6 +175,12 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
                 break;
             }
         }
+
+        info!("flushing...");
+        LivenessStorage::flush(self.liveness_storage())
+            .await
+            .unwrap();
+
         info!("pacemaker down");
         Ok(())
     }
@@ -157,8 +206,9 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
                         )
                         .is_ok()
                     {
-                        self.check_pending_prop(self.storage.get_leaf().height())
-                            .await?
+                        let leaf_height =
+                            LivenessStorage::get_leaf(self.liveness_storage()).height();
+                        self.check_pending_prop(leaf_height).await?
                     }
                 }
             }
@@ -171,27 +221,25 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
     async fn process_network_event(&mut self, net_event: PeerEvent) -> io::Result<()> {
         match net_event {
             PeerEvent::NewProposal { ctx, prop } => {
-                if self.storage.is_qc_node_exists(prop.justify()) {
-                    self.emit_safety_event(SafetyEvent::RecvProposal(ctx, Arc::new(*prop)))
-                        .await?;
+                if self.liveness_storage().is_qc_node_exists(prop.justify()) {
+                    self.emit_safety_event(SafetyEvent::RecvProposal(ctx, Arc::new(*prop)));
                 } else {
                     self.pending_prop.push(SafetyEventWrapper::from(
                         prop.height(),
                         SafetyEvent::RecvProposal(ctx, Arc::new(*prop)),
                     ));
-                    self.check_pending_prop(self.storage.get_leaf().height())
-                        .await?;
+                    let height = LivenessStorage::get_leaf(self.liveness_storage()).height();
+                    self.check_pending_prop(height).await?;
                 }
             }
             PeerEvent::AcceptProposal { ctx, prop, sign } => {
                 if let Some(sign) = sign {
-                    self.emit_safety_event(SafetyEvent::RecvSign(ctx, Arc::new(*prop), sign))
-                        .await?;
+                    self.emit_safety_event(SafetyEvent::RecvSign(ctx, Arc::new(*prop), sign));
                 }
             }
             PeerEvent::Timeout { ctx, tc } => {
                 info!("recv timeout msg view={} from {}", ctx.view, &ctx.from);
-                match self.storage.append_tc(tc) {
+                match self.liveness_storage().append_tc(tc) {
                     Ok(v) => {
                         if v > self.view {
                             // view=self.view timeouts right now.
@@ -205,7 +253,7 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
                 }
             }
             PeerEvent::BranchSyncRequest { ctx, strategy } => {
-                match self.storage.fetch_branch(&strategy) {
+                match self.liveness_storage().fetch_branch(&strategy) {
                     Ok(bd) => {
                         self.emit_peer_event(PeerEvent::BranchSyncResponse {
                             ctx,
@@ -235,7 +283,6 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
             } => match status {
                 SyncStatus::Success if branch.is_some() => {
                     self.emit_safety_event(SafetyEvent::BranchSync(ctx, branch.unwrap().data))
-                        .await?
                 }
                 other => error!("{:?}", other),
             },
@@ -256,7 +303,9 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
                 .await?;
             }
             machine::Ready::UpdateQCHigh(_, node) => {
-                if let Err(e) = self.storage.update_qc_high(&node, node.justify()) {
+                if let Err(e) =
+                    LivenessStorage::update_qc_high(self.liveness_storage(), &node, node.justify())
+                {
                     error!("{:?}", e);
                 }
             }
@@ -292,9 +341,9 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
     /// Check pending queue, start branch synchronization if there are proposals lack of `justify.node` .
     async fn check_pending_prop(&mut self, leaf_height: ViewNumber) -> io::Result<()> {
         if let Some(sw) = self.pending_prop.pop() {
-            let view = -sw.view as ViewNumber;
-            if view <= leaf_height {
-                self.emit_safety_event(sw.se).await?;
+            let next_prop_view = -sw.view as ViewNumber;
+            if next_prop_view <= leaf_height + 1 {
+                self.emit_safety_event(sw.se);
             } else {
                 // re-push
                 self.pending_prop.push(sw);
@@ -309,7 +358,7 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
                     )
                     .is_ok()
                 {
-                    let grow_from = self.storage.get_locked_node().height();
+                    let grow_from = self.liveness_storage().get_locked_node().height();
 
                     info!(
                         "start branch sync: from={}, batch-size={}]",
@@ -333,9 +382,19 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
     }
 
     #[inline]
-    async fn emit_safety_event(&mut self, se: SafetyEvent) -> io::Result<()> {
-        self.machine_adaptor.safety().send(se).await.unwrap();
-        Ok(())
+    fn emit_safety_event(&mut self, se: SafetyEvent) {
+        // self.machine_adaptor.safety().send(se).await.unwrap();
+        match self.machine.process_safety_event(se) {
+            Ok(ready) => {
+                if let Ready::Nil = ready {
+                    return;
+                }
+                self.ready_queue.push_back(ready);
+            }
+            Err(e) => {
+                error!("{:?}", e);
+            }
+        }
     }
 
     // todo: consider use Pacemaker Error
@@ -356,65 +415,25 @@ impl<S: LivenessStorage + Send + Sync> Pacemaker<S> {
         self.update_pm_status(view);
         self.elector.view_change(view);
     }
-}
-
-pub struct AsyncMachineAdaptor {
-    pub ready_recvr: TchanR<machine::Ready>,
-    pub safety_sender: TchanS<machine::SafetyEvent>,
-}
-
-impl AsyncMachineAdaptor {
-    #[inline]
-    pub fn ready(&mut self) -> &mut TchanR<machine::Ready> {
-        &mut self.ready_recvr
-    }
 
     #[inline]
-    pub fn safety(&mut self) -> &mut TchanS<machine::SafetyEvent> {
-        &mut self.safety_sender
+    fn liveness_storage(&mut self) -> &mut S {
+        self.machine.storage()
     }
 }
 
-/// Async wrapper for `Machine`.
-pub struct AsyncMachineWrapper<S>
-where
-    S: SafetyStorage,
-{
-    // buffer.
-    safety_in: TchanR<machine::SafetyEvent>,
-    ready_out: TchanS<machine::Ready>,
-    machine: machine::Machine<S>,
-}
-
-impl<S: SafetyStorage> AsyncMachineWrapper<S> {
-    pub async fn run(&mut self, mut quit_ch: CtlRecvr) -> io::Result<()> {
-        info!("machine up");
-        let mut quit = false;
-        while !quit {
-            tokio::select! {
-                _ = quit_ch.recv() => {
-                    quit = true;
-                },
-                Some(se) = self.safety_in.recv() => {
-                    match self.machine.process_safety_event(se){
-                        Ok(rd) => {
-                            if let machine::Ready::Nil = &rd{
-                                continue;
-                            }
-                            if let Err(e) = self.ready_out.send(rd).await{
-                                // Receiver half is closed.
-                                quit = true;
-                                error!("{}", e.to_string());
-                            }
-                        },
-                        Err(e) => {
-                            error!("{}", e.to_string());
-                        }
-                    }
-                },
-            }
+#[test]
+#[ignore = "tested"]
+fn tokio_tick() {
+    use std::time::Duration;
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        interval.tick().await;
+        let start = tokio::time::Instant::now();
+        println!("time:{:?}", start);
+        loop {
+            interval.tick().await;
+            println!("time:{:?}", start.elapsed());
         }
-        info!("machine down");
-        Ok(())
-    }
+    });
 }

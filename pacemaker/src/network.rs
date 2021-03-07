@@ -9,6 +9,7 @@ use log::{error, info};
 use tokio::{io::AsyncReadExt, net::TcpSocket};
 
 pub enum NetworkMode {
+    Test,
     // NetworkAdaptor connects to other peers directly using TCP.
     Direct(HashMap<ReplicaID, SocketAddr>),
     // NetworkAdaptor forwards events to a tcp proxy who knows how to diliver them.
@@ -24,10 +25,10 @@ pub struct NetworkAdaptor {
     // from other peers.
     pub event_recvr: PeerEventRecvr,
     pub mode: NetworkMode,
-    ctrl_ch: CtlSender,
-    self_addr: SocketAddr,
+    pub ctrl_ch: CtlSender,
+    pub self_addr: SocketAddr,
     // Maxium Byte for each PeerEvent.
-    max_transport_limit: usize,
+    pub max_transport_limit: usize,
 }
 
 impl NetworkAdaptor {

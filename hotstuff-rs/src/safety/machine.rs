@@ -482,4 +482,8 @@ impl<S: SafetyStorage> Machine<S> {
             storage,
         }
     }
+
+    pub fn storage(&mut self) -> &mut S {
+        &mut self.storage
+    }
 }

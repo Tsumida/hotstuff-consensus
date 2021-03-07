@@ -12,5 +12,5 @@ thiserror = ""
 hs-data = {path = "../hs-data"}
 rand = ""
 sha2 = ""
-base64 = ""
+base64 = "" 
 lazy_static = ""
