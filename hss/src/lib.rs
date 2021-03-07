@@ -366,7 +366,11 @@ pub async fn init_hotstuff_storage(
     mysql_addr: &str,
     signaturer: DefaultSignaturer,
 ) -> HotstuffStorage {
-    let conn_pool = MySqlPool::connect(mysql_addr).await.unwrap();
+    let conn_pool = sqlx::pool::PoolOptions::new()
+        .max_connections(4)
+        .connect(mysql_addr)
+        .await
+        .unwrap();
 
     let backend = Some(MySQLStorage { conn_pool });
 

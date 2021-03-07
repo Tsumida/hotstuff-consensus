@@ -22,18 +22,21 @@ jobs:
           MYSQL_ROOT_PASSWORD: helloworld
         ports:
           - 3306
-        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=3
+        options: --health-cmd="mysqladmin ping" --health-interval=10s --health-timeout=5s --health-retries=10
 
     steps:
     - uses: actions/checkout@v1
-    - name: Build
+    - name: Build hs-test
       working-directory: ./hs-test
       run: cargo build 
-    - name: Run hotstuff tests
+    - name: Run hs-test
       working-directory: ./hs-test
       run: cargo test 
       env:
         DB_PORT: 3306
+    - name: Build hss
+      working-directory: ./hss
+      run: cargo build
     - name: Run hss tests
       working-directory: ./hss
       run: cargo test
