@@ -989,7 +989,9 @@ impl LivenessStorage for HotstuffStorage {
         self.set_dirty();
 
         // current_view - 1 is ok
-        Ok(self.compress_tc().unwrap_or(self.get_view() - 1))
+        Ok(self
+            .compress_tc()
+            .unwrap_or(self.get_view().saturating_sub(1)))
     }
 
     fn is_reach_threshold(&self, view: ViewNumber) -> bool {

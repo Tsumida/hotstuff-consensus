@@ -45,6 +45,7 @@ pub enum SignType {
 }
 
 impl TimeoutCertificate {
+    /// Create partial tc.
     pub fn new(from: ReplicaID, view: ViewNumber, view_sign: SignKit, qc_high: GenericQC) -> Self {
         Self {
             from,

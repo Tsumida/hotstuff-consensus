@@ -4,7 +4,7 @@ use crate::pacemaker::{CtlRecvr, CtlSender};
 use super::pacemaker::TchanS;
 use futures_timer::Delay;
 use hs_data::ViewNumber;
-use log::error;
+use log::{debug, error};
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
@@ -66,23 +66,23 @@ impl DefaultTimer {
                 },
                 _ = end_ch.recv() => {},
             };
-            cnt.fetch_sub(1, Ordering::SeqCst);
+            let left = cnt.fetch_sub(1, Ordering::SeqCst);
+            debug!("view timeout task done. {} task left", left - 1);
         });
     }
 
-    fn stop_view_timer(&self) {
+    pub(crate) fn stop_view_timer(&self) {
+        // refactor: make sure all prev timer is dropped.
+        // `self.stop_ch.send(())` return once at least one handle so it doesn't assume all has drop.
         if let Err(e) = self.stop_ch.send(()) {
             error!("{}", e.to_string());
         }
     }
 
     /// Timeout right now.
-    pub(crate) fn view_timeout(&mut self, this_view: ViewNumber) {
+    pub(crate) fn view_timeout(&mut self, this_view: ViewNumber, dur: Duration) {
         self.stop_view_timer();
-        self.start(
-            Duration::from_millis(1),
-            TimeoutEvent::ViewTimeout(this_view),
-        );
+        self.start(dur, TimeoutEvent::ViewTimeout(this_view));
     }
 }
 

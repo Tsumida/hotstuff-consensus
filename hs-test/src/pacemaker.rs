@@ -4,21 +4,21 @@ mod test {
     use cryptokit::DefaultSignaturer;
     use hotstuff_rs::safety::{machine::Machine, voter::Voter};
     use hs_data::{
-        form_chain, msg::Context, threshold_sign_kit, ReplicaID, TreeNode, INIT_NODE,
-        INIT_NODE_HASH, SK,
+        form_chain, msg::Context, threshold_sign_kit, ReplicaID, SignKit, TreeNode, INIT_NODE,
+        INIT_NODE_HASH, INIT_QC, SK,
     };
     use hss::HotstuffStorage;
-    use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
+    use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
     use threshold_crypto::{PublicKeySet, SecretKeySet};
 
     use pacemaker::{
-        data::PeerEvent,
+        data::{PeerEvent, TimeoutCertificate},
         elector::RoundRobinLeaderElector,
         network::{NetworkAdaptor, NetworkMode},
         pacemaker::{Pacemaker, TchanR, TchanS},
     };
 
-    use crate::utils::init_logger;
+    use crate::utils::{init_logger, MYSQL_ADDR_CUSTOM_DB, TEST_MYSQL_ADDR};
 
     static TX: &'static [&'static str] = &[
         "One summer afternoon",
@@ -31,6 +31,9 @@ mod test {
     ];
 
     const CHANNEL_SIZE: usize = 128;
+    const DEFAULT_TESTEE: usize = 0;
+    const DEFAULT_SIZE: usize = 4;
+    const DEFAULT_TH: usize = (DEFAULT_SIZE << 1) / 3;
 
     struct MockerNetwork {
         token: String,
@@ -62,7 +65,7 @@ mod test {
         }
 
         /// Verify each PeerEvent and return false once meet a event with `v(&event) == false`.
-        async fn vertify_output_sequence(&mut self, v: impl Fn(&PeerEvent) -> bool) -> bool {
+        async fn vertify_output_sequence(&mut self, mut v: impl FnMut(&PeerEvent) -> bool) -> bool {
             let mut flag = true;
             while let Some(ready) = self.pe_recvr.recv().await {
                 flag &= v(&ready);
@@ -82,7 +85,7 @@ mod test {
     ) -> (MockerNetwork, Pacemaker<HotstuffStorage>) {
         assert!(n >= 1);
         let threshold = (n << 1) / 3;
-        let sign_id = 0;
+        let sign_id = DEFAULT_TESTEE;
         let id = format!("replica-{}", sign_id);
         let peers_addr: HashMap<ReplicaID, String> = (0..n)
             .map(|i| (format!("replica-{}", i), format!("127.0.0.1:{}", 8800 + i)))
@@ -138,17 +141,24 @@ mod test {
                 pks,
                 vec_sks,
             },
-            Pacemaker::new(id, elector, machine, net_adaptor),
+            Pacemaker::new(
+                id,
+                elector,
+                machine,
+                net_adaptor,
+                signaturer.as_ref().clone(),
+            ),
         )
     }
 
-    async fn spawn_pm() -> (
+    async fn spawn_pm(
+        mysql_addr: &str,
+    ) -> (
         MockerNetwork,
         tokio::sync::mpsc::Sender<()>,
         tokio::task::JoinHandle<()>,
     ) {
-        let (mpm, mut pm) =
-            new_mocker_with_mysql_enabled(4, format!("test"), crate::utils::TEST_MYSQL_ADDR).await;
+        let (mpm, mut pm) = new_mocker_with_mysql_enabled(4, format!("test"), mysql_addr).await;
 
         let (quit_sender, quit_ch) = tokio::sync::mpsc::channel(1);
 
@@ -160,38 +170,45 @@ mod test {
     }
 
     #[test]
-    fn test_bootstrap() {
+    fn test_responsiveness() {
         //
-        // Test: PM, M & HSS cooperating
-        //
+        // Test:
+        //      PM, M & HSS cooperating. After accpeting new proposal, the testee will quickly go to next view.
         //
         //      MPM ------> PM ------> M ------> HSS ------> MySQL
         //                 | |         |
         //         <-------   <--------
         //        PE(Accept)  Ready(Sign)
+        //        PE(Timeout)
         //
 
-        init_logger("./test-output/test-bootstrap.log");
+        init_logger("./test-output/test-responsiveness.log");
 
         tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(async move {
-                let (mut mpm, quit_sender, handler) = spawn_pm().await;
+                let (mut mpm, quit_sender, handler) = spawn_pm(TEST_MYSQL_ADDR).await;
 
                 let chain = form_chain(TX.iter().take(4).map(|s| *s), &mpm.vec_sks, &mpm.pks);
                 let from = format!("replica-1");
 
                 mpm.propose_all(from, chain.iter().map(|(_, p)| p)).await;
 
+                // let pm process events.
+                tokio::time::sleep(Duration::from_secs(8)).await;
                 quit_sender.send(()).await.unwrap();
 
+                let mut view = 1;
                 let flag = mpm
-                    .vertify_output_sequence(|event| {
-                        if let PeerEvent::AcceptProposal { .. } = event {
-                            true
-                        } else {
-                            false
+                    .vertify_output_sequence(|event| match event {
+                        // first accept and then timeout
+                        PeerEvent::AcceptProposal { prop, sign, .. } => {
+                            let res = prop.height() == view && sign.is_some();
+                            view += 1;
+                            res
                         }
+                        PeerEvent::Timeout { tc, .. } => tc.view() < view,
+                        _ => false,
                     })
                     .await;
 
@@ -201,8 +218,92 @@ mod test {
     }
 
     #[test]
-    #[ignore = "unimpl"]
-    fn test_local_timeout() {}
+    #[ignore = "too long"]
+    fn test_local_timeout() {
+        //
+        // Test:
+        //      Wait for local timeout.
+        //
+        init_logger("./test-output/test-local-timeout.log");
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let (mut mpm, quit_sender, handler) = spawn_pm(TEST_MYSQL_ADDR).await;
+
+                tokio::time::sleep(Duration::from_secs(30 * 2)).await;
+                quit_sender.send(()).await.unwrap();
+
+                let mut cnt = 0;
+                let flag = mpm
+                    .vertify_output_sequence(|event| match event {
+                        PeerEvent::Timeout { tc, .. } => {
+                            if cnt < tc.view() {
+                                cnt = tc.view();
+                                true
+                            } else {
+                                false
+                            }
+                        }
+                        _ => false,
+                    })
+                    .await;
+
+                handler.await.unwrap();
+                assert!(flag);
+            });
+    }
+
+    #[test]
+    fn test_remote_timeout() {
+        //
+        // Test:
+        //      Testee receives n-f PartialTC(view=v), and then timeout and go to view=v+1
+        //
+        init_logger("./test-output/test-remote-timeout.log");
+
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move {
+                let (mut mpm, quit_sender, handler) = spawn_pm(TEST_MYSQL_ADDR).await;
+
+                // create n-f PartialTC with view=v.
+                let v = 10u64;
+                for pe in mpm
+                    .vec_sks
+                    .iter()
+                    .filter(|(id, _)| id != &DEFAULT_TESTEE)
+                    .map(|(id, sks)| {
+                        let from = format!("replica-{}", id);
+                        let tc = TimeoutCertificate::new(
+                            from.clone(),
+                            v,
+                            SignKit::new(*id, sks.sign(&v.to_be_bytes())),
+                            INIT_QC.clone(),
+                        );
+                        PeerEvent::Timeout {
+                            ctx: Context { from, view: v },
+                            tc,
+                        }
+                    })
+                {
+                    mpm.pe_sender.send(pe).await.unwrap();
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+
+                quit_sender.send(()).await.unwrap();
+
+                let flag = mpm
+                    .vertify_output_sequence(|event| match event {
+                        PeerEvent::Timeout { tc, .. } => tc.view() == v + 1,
+                        _ => false,
+                    })
+                    .await;
+
+                handler.await.unwrap();
+                assert!(flag);
+            });
+    }
 
     #[test]
     #[ignore = "unimpl"]

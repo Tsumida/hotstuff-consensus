@@ -5,7 +5,6 @@ use hs_data::{ReplicaID, ViewNumber};
 pub struct RoundRobinLeaderElector {
     // next_leader = (this_leader + 1) % peers_nums
     round_mapper: Vec<ReplicaID>,
-    view: ViewNumber,
 }
 
 impl RoundRobinLeaderElector {
@@ -22,17 +21,12 @@ impl RoundRobinLeaderElector {
             .get(crate::utils::view_hash(view, self.round_mapper.len()))
             .unwrap()
     }
-
-    pub fn view_change(&mut self, view: ViewNumber) {
-        self.view = ViewNumber::max(view, self.view);
-    }
 }
 
 impl Default for RoundRobinLeaderElector {
     fn default() -> Self {
         Self {
             round_mapper: Vec::new(),
-            view: 0,
         }
     }
 }

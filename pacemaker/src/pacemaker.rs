@@ -1,11 +1,13 @@
+use crate::network::NetworkAdaptor;
 use crate::{
-    data::{BranchSyncStrategy, PeerEvent, SyncStatus},
+    data::{BranchSyncStrategy, PeerEvent, SyncStatus, TimeoutCertificate},
     elector::RoundRobinLeaderElector,
+    liveness_storage::LivenessStorage,
     timer::{DefaultTimer, TimeoutEvent},
 };
-use crate::{liveness_storage::LivenessStorage, network::NetworkAdaptor};
+use cryptokit::DefaultSignaturer;
 use hotstuff_rs::safety::machine::{self, Machine, Ready, Safety, SafetyEvent, SafetyStorage};
-use hs_data::{msg::Context, ReplicaID, ViewNumber};
+use hs_data::{msg::Context, GenericQC, ReplicaID, SignKit, ViewNumber};
 use std::{
     collections::{BinaryHeap, VecDeque},
     io,
@@ -102,6 +104,8 @@ where
     id: ReplicaID,
     pub elector: crate::elector::RoundRobinLeaderElector,
 
+    signaturer: DefaultSignaturer,
+
     machine: Machine<S>,
     ready_queue: VecDeque<Ready>,
     pending_prop: BinaryHeap<SafetyEventWrapper>,
@@ -124,11 +128,14 @@ where
         elector: RoundRobinLeaderElector,
         machine: Machine<S>,
         net_adaptor: NetworkAdaptor,
+        signaturer: DefaultSignaturer,
     ) -> Pacemaker<S>
     where
         Self: Sized,
     {
         let (notifier, timeout_ch) = tokio::sync::mpsc::channel(1);
+
+        // refactor
         let max_view_timeout = 60_000;
         let rtt = 10_000;
         let timer = DefaultTimer::new(notifier, max_view_timeout, rtt);
@@ -137,6 +144,7 @@ where
             view: 0,
             id,
             elector,
+            signaturer,
             sync_state: Arc::new(AtomicU8::new(SYNC_IDLE)),
             pending_prop: BinaryHeap::with_capacity(8),
             net_adaptor,
@@ -152,7 +160,9 @@ where
         info!("pacemaker up");
         let mut quit = false;
 
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
+        self.goto_new_view(self.view + 1);
+
+        let mut interval = tokio::time::interval(Duration::from_millis(2000));
         interval.tick().await;
 
         loop {
@@ -160,6 +170,10 @@ where
                 _ = interval.tick() => {
                     // refactor
                     LivenessStorage::flush(self.liveness_storage()).await.unwrap();
+
+                    while let Some(ready) = self.ready_queue.pop_front(){
+                        self.process_ready_event(ready).await.unwrap();
+                    }
                 },
                 Some(()) = quit_ch.recv() => {
                     quit = true;
@@ -168,7 +182,7 @@ where
                     self.process_network_event(net_event).await?;
                 },
                 Some(te) = self.timeout_ch.recv() => {
-                    self.process_timeout_event(te).await?;
+                    self.process_timeout_evnet(te).await?;
                 },
             }
             if quit {
@@ -176,6 +190,7 @@ where
             }
         }
 
+        // refactor
         info!("flushing...");
         LivenessStorage::flush(self.liveness_storage())
             .await
@@ -185,32 +200,48 @@ where
         Ok(())
     }
 
-    async fn process_timeout_event(&mut self, te: TimeoutEvent) -> io::Result<()> {
+    async fn process_timeout_evnet(&mut self, te: TimeoutEvent) -> io::Result<()> {
         match te {
-            TimeoutEvent::ViewTimeout(view) => {
-                if view >= self.view {
-                    self.goto_new_view(view);
-                    self.timer.start(
-                        self.timer.timeout_by_delay(),
-                        TimeoutEvent::ViewTimeout(self.view),
-                    );
+            TimeoutEvent::ViewTimeout(view) => self.process_local_timeout(view).await,
+        }
+    }
 
-                    // check pending_prop
-                    if self
-                        .sync_state
-                        .compare_exchange(
-                            SYNC_SYNCHRONIZING,
-                            SYNC_IDLE,
-                            Ordering::SeqCst,
-                            Ordering::SeqCst,
-                        )
-                        .is_ok()
-                    {
-                        let leaf_height =
-                            LivenessStorage::get_leaf(self.liveness_storage()).height();
-                        self.check_pending_prop(leaf_height).await?
-                    }
-                }
+    async fn process_local_timeout(&mut self, view: ViewNumber) -> io::Result<()> {
+        if view >= self.view {
+            // emit timeout event and save tc.
+            let qc_high = self.liveness_storage().get_qc_high().as_ref().clone();
+            let tc = self.sign_tc(self.view, qc_high);
+            self.emit_peer_event(PeerEvent::Timeout {
+                ctx: Context {
+                    from: self.id.clone(),
+                    view: self.view,
+                },
+                tc: tc.clone(),
+            })
+            .await
+            .unwrap();
+
+            self.liveness_storage().append_tc(tc).unwrap();
+
+            // goto new view and reset timer.
+            // if view == self.view -> goto self.view + 1
+            // if view  > self.view -> goto view
+            self.goto_new_view(ViewNumber::max(view, self.view + 1));
+            info!("timeout and goto view {}", self.view);
+
+            // Reuse local timeout event for branch synchronizing timeout.
+            if self
+                .sync_state
+                .compare_exchange(
+                    SYNC_SYNCHRONIZING,
+                    SYNC_IDLE,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                let leaf_height = LivenessStorage::get_leaf(self.liveness_storage()).height();
+                return self.check_pending_prop(leaf_height).await;
             }
         }
 
@@ -225,7 +256,8 @@ where
                     self.emit_safety_event(SafetyEvent::RecvProposal(ctx, Arc::new(*prop)));
                 } else {
                     self.pending_prop.push(SafetyEventWrapper::from(
-                        prop.height(),
+                        // use prop.justify.view, not prop.height
+                        prop.justify().view(),
                         SafetyEvent::RecvProposal(ctx, Arc::new(*prop)),
                     ));
                     let height = LivenessStorage::get_leaf(self.liveness_storage()).height();
@@ -244,7 +276,8 @@ where
                         if v > self.view {
                             // view=self.view timeouts right now.
                             // self.view will increase once the pacemaker recv local timeout event.
-                            self.timer.view_timeout(self.view);
+                            self.timer
+                                .view_timeout(self.view, self.timer.timeout_by_delay());
                         }
                     }
                     Err(e) => {
@@ -286,7 +319,8 @@ where
                 }
                 other => error!("{:?}", other),
             },
-            _ => {}
+
+            PeerEvent::Ping { ctx, cont } => {}
         }
         Ok(())
     }
@@ -316,6 +350,10 @@ where
                     sign: Some(sign),
                 })
                 .await?;
+
+                // responsiveness, goto next view right now.
+                self.timer
+                    .view_timeout(self.view, self.timer.timeout_by_delay());
             }
             machine::Ready::CommitState(_, _) => {}
             machine::Ready::BranchSyncDone(leaf) => {
@@ -341,8 +379,8 @@ where
     /// Check pending queue, start branch synchronization if there are proposals lack of `justify.node` .
     async fn check_pending_prop(&mut self, leaf_height: ViewNumber) -> io::Result<()> {
         if let Some(sw) = self.pending_prop.pop() {
-            let next_prop_view = -sw.view as ViewNumber;
-            if next_prop_view <= leaf_height + 1 {
+            let justify_view = -sw.view as ViewNumber;
+            if justify_view <= leaf_height {
                 self.emit_safety_event(sw.se);
             } else {
                 // re-push
@@ -381,7 +419,18 @@ where
         Ok(())
     }
 
+    // todo: consider use Pacemaker Error
+    async fn emit_peer_event(&mut self, pe: PeerEvent) -> io::Result<()> {
+        let dur = self.timer.timeout_by_delay();
+        if let Err(_) = self.net_adaptor.event_sender.send_timeout(pe, dur).await {
+            error!("pacemaker -> network adaptor block and timeout");
+        }
+
+        Ok(())
+    }
+
     #[inline]
+    /// Communicate with Machine.
     fn emit_safety_event(&mut self, se: SafetyEvent) {
         // self.machine_adaptor.safety().send(se).await.unwrap();
         match self.machine.process_safety_event(se) {
@@ -397,43 +446,32 @@ where
         }
     }
 
-    // todo: consider use Pacemaker Error
-    async fn emit_peer_event(&mut self, pe: PeerEvent) -> io::Result<()> {
-        let dur = self.timer.timeout_by_delay();
-        if let Err(_) = self.net_adaptor.event_sender.send_timeout(pe, dur).await {
-            error!("pacemaker -> network adaptor block and timeout");
-        }
-
-        Ok(())
-    }
-
     fn update_pm_status(&mut self, view: ViewNumber) {
-        self.view = ViewNumber::max(self.view, view) + 1;
+        self.view = ViewNumber::max(self.view, view);
     }
 
+    /// Go to new view and reset state. This function will increase view.
     fn goto_new_view(&mut self, view: ViewNumber) {
+        self.timer.stop_view_timer();
         self.update_pm_status(view);
-        self.elector.view_change(view);
+        self.timer.start(
+            self.timer.timeout_by_delay(),
+            TimeoutEvent::ViewTimeout(self.view),
+        );
     }
 
     #[inline]
     fn liveness_storage(&mut self) -> &mut S {
         self.machine.storage()
     }
-}
 
-#[test]
-#[ignore = "tested"]
-fn tokio_tick() {
-    use std::time::Duration;
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-        let mut interval = tokio::time::interval(Duration::from_millis(500));
-        interval.tick().await;
-        let start = tokio::time::Instant::now();
-        println!("time:{:?}", start);
-        loop {
-            interval.tick().await;
-            println!("time:{:?}", start.elapsed());
-        }
-    });
+    // refactor:
+    fn sign_tc(&self, view: ViewNumber, qc_high: GenericQC) -> TimeoutCertificate {
+        let sign_kit = SignKit::from((
+            self.signaturer.sks.sign(&view.to_be_bytes()),
+            self.signaturer.sign_id,
+        ));
+
+        TimeoutCertificate::new(self.id.clone(), self.view, sign_kit, qc_high)
+    }
 }

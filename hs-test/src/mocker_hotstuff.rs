@@ -16,7 +16,6 @@ use hotstuff_rs::safety::{
 };
 use hs_data::msg::Context;
 
-
 pub(crate) enum ExpectedState<'a> {
     // for hotstuff status
     LockedAt(String),
