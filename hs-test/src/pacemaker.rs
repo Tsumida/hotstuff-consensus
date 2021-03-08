@@ -18,7 +18,7 @@ mod test {
         pacemaker::{Pacemaker, TchanR, TchanS},
     };
 
-    use crate::utils::{init_logger, MYSQL_ADDR_CUSTOM_DB, TEST_MYSQL_ADDR};
+    use crate::utils::{init_logger, TEST_MYSQL_ADDR};
 
     static TX: &'static [&'static str] = &[
         "One summer afternoon",
@@ -245,6 +245,7 @@ mod test {
                                 false
                             }
                         }
+                        PeerEvent::NewView { .. } => true,
                         _ => false,
                     })
                     .await;
@@ -296,6 +297,7 @@ mod test {
                 let flag = mpm
                     .vertify_output_sequence(|event| match event {
                         PeerEvent::Timeout { tc, .. } => tc.view() == v + 1,
+                        PeerEvent::NewView { .. } => true,
                         _ => false,
                     })
                     .await;

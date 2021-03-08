@@ -160,7 +160,7 @@ where
         info!("pacemaker up");
         let mut quit = false;
 
-        self.goto_new_view(self.view + 1);
+        self.goto_new_view(self.view + 1).await?;
 
         let mut interval = tokio::time::interval(Duration::from_millis(2000));
         interval.tick().await;
@@ -226,7 +226,8 @@ where
             // goto new view and reset timer.
             // if view == self.view -> goto self.view + 1
             // if view  > self.view -> goto view
-            self.goto_new_view(ViewNumber::max(view, self.view + 1));
+            self.goto_new_view(ViewNumber::max(view, self.view + 1))
+                .await?;
             info!("timeout and goto view {}", self.view);
 
             // Reuse local timeout event for branch synchronizing timeout.
@@ -319,8 +320,10 @@ where
                 }
                 other => error!("{:?}", other),
             },
-
             PeerEvent::Ping { ctx, cont } => {}
+            PeerEvent::NewView { ctx, qc_high } => {
+                self.emit_safety_event(SafetyEvent::RecvNewViewMsg(ctx, Arc::new(*qc_high)));
+            }
         }
         Ok(())
     }
@@ -451,13 +454,23 @@ where
     }
 
     /// Go to new view and reset state. This function will increase view.
-    fn goto_new_view(&mut self, view: ViewNumber) {
+    async fn goto_new_view(&mut self, view: ViewNumber) -> io::Result<()> {
         self.timer.stop_view_timer();
         self.update_pm_status(view);
         self.timer.start(
             self.timer.timeout_by_delay(),
             TimeoutEvent::ViewTimeout(self.view),
         );
+
+        let qc_high = self.liveness_storage().get_qc_high();
+        self.emit_peer_event(PeerEvent::NewView {
+            ctx: Context {
+                from: self.id.clone(),
+                view: self.view,
+            },
+            qc_high: Box::new(qc_high.as_ref().clone()),
+        })
+        .await
     }
 
     #[inline]

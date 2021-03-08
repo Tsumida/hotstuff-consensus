@@ -142,6 +142,10 @@ pub enum PeerEvent {
         prop: Box<TreeNode>,
         sign: Option<Box<SignKit>>,
     },
+    NewView {
+        ctx: Context,
+        qc_high: Box<GenericQC>,
+    },
     // Timeout message from other replica.
     Timeout {
         ctx: Context,
