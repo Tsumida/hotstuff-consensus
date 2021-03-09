@@ -161,9 +161,9 @@ impl MockHotStuff {
         );
         let testee: Machine<HotstuffStorage> = Machine::new(
             voter,
-            format!("{}", self.testee_id),
+            format!("replica-{}", self.testee_id),
             self.n,
-            Some(format!("{}", self.leader_id)),
+            Some(format!("replica-{}", self.leader_id)),
             storage,
         );
 
@@ -216,7 +216,7 @@ impl MockHotStuff {
             ExpectedState::QcHighOf(tx) => {
                 let prop_hash = self.tx_to_hash.get(tx).unwrap();
                 let (qc_node_hash, _) = self.nodes.get_key_value(ss.qc_high.node_hash()).unwrap();
-                assert_eq!(qc_node_hash, prop_hash);
+                assert!(qc_node_hash == prop_hash);
             }
             _ => unimplemented!(),
         };
@@ -237,18 +237,20 @@ impl MockHotStuff {
         }
 
         let leader = self.leader_id;
+        let testee = self.testee_id;
         self.testee()
             .process_safety_event(SafetyEvent::BranchSync(
-                Context {
-                    from: format!("{}", leader),
-                    view: 6,
-                },
+                Context::single(
+                    format!("replica-{}", leader),
+                    format!("replica-{}", testee),
+                    6,
+                ),
                 branch,
             ))
             .unwrap();
     }
 
-    /// let testee extends branch from specified parent`. This method will increate height.
+    /// Testee recv new proposal based on specified parent`. This method will increate height.
     /// Panic if parent didn't exist.
     pub(crate) fn extend_from(&mut self, parent: String, tx: String) {
         let parent_hash = self.tx_to_hash.get(&parent).unwrap().clone();
@@ -294,10 +296,11 @@ impl MockHotStuff {
                 .as_mut()
                 .unwrap()
                 .process_safety_event(SafetyEvent::RecvNewViewMsg(
-                    Context {
-                        from: format!("{}", i),
-                        view: self.height,
-                    },
+                    Context::single(
+                        format!("replica-{}", self.leader_id),
+                        format!("replica-{}", self.testee_id),
+                        self.height,
+                    ),
                     Arc::new(qc.clone()),
                 ))
                 .unwrap();
@@ -359,10 +362,11 @@ impl MockHotStuff {
             .as_mut()
             .unwrap()
             .process_safety_event(SafetyEvent::RecvNewViewMsg(
-                Context {
-                    from: format!("{}", self.adversial.unwrap()),
-                    view: self.height,
-                },
+                Context::single(
+                    format!("replica-{}", self.leader_id),
+                    format!("replica-{}", self.testee_id),
+                    self.height,
+                ),
                 prev_qc,
             ));
         self
@@ -382,10 +386,11 @@ impl MockHotStuff {
                         .sign(&node.to_be_bytes());
 
                     let _ = self.testee.as_mut().unwrap().on_recv_vote(
-                        &Context {
-                            from: format!("{}", from),
-                            view: self.height,
-                        },
+                        &Context::single(
+                            format!("replica-{}", from),
+                            format!("replica-{}", self.testee_id),
+                            self.height,
+                        ),
                         &node,
                         &SignKit::from((sign, from)),
                     );
@@ -395,10 +400,11 @@ impl MockHotStuff {
                     let node = self.nodes.get(node_hash).unwrap();
                     let sign = self.form_corrupted_sign();
                     let err = self.testee.as_mut().unwrap().on_recv_vote(
-                        &Context {
-                            from: format!("{}", from),
-                            view: self.height,
-                        },
+                        &Context::single(
+                            format!("replica-{}", self.leader_id),
+                            format!("replica-{}", self.testee_id),
+                            self.height,
+                        ),
                         &node,
                         &SignKit::from((sign, from)),
                     );
@@ -441,7 +447,7 @@ impl MockHotStuff {
         self.testee
             .as_mut()
             .unwrap()
-            .on_view_change(format!("{}", self.leader_id), self.height)
+            .on_view_change(format!("replica-{}", self.leader_id), self.height)
             .unwrap();
     }
 
@@ -476,10 +482,11 @@ impl MockHotStuff {
         justify: &GenericQC,
     ) -> Result<Ready, SafetyErr> {
         self.testee.as_mut().unwrap().on_recv_proposal(
-            &Context {
-                from: format!("mocker"),
-                view: self.height as u64,
-            },
+            &Context::single(
+                format!("replica-{}", self.leader_id),
+                format!("replica-{}", self.testee_id),
+                self.height,
+            ),
             node,
             justify,
         )

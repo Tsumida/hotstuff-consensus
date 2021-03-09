@@ -212,10 +212,7 @@ where
             let qc_high = self.liveness_storage().get_qc_high().as_ref().clone();
             let tc = self.sign_tc(self.view, qc_high);
             self.emit_peer_event(PeerEvent::Timeout {
-                ctx: Context {
-                    from: self.id.clone(),
-                    view: self.view,
-                },
+                ctx: Context::broadcast(self.id.clone(), self.view),
                 tc: tc.clone(),
             })
             .await
@@ -405,11 +402,15 @@ where
                         "start branch sync: from={}, batch-size={}]",
                         grow_from, BATCH_SIZE
                     );
+
+                    // note:
+                    let ctx = Context::single(
+                        self.id.clone(),
+                        self.elector.get_leader(self.view).clone(),
+                        self.view,
+                    );
                     self.emit_peer_event(PeerEvent::BranchSyncRequest {
-                        ctx: Context {
-                            from: self.id.clone(),
-                            view: self.view,
-                        },
+                        ctx,
                         strategy: BranchSyncStrategy::Grow {
                             grow_from,
                             batch_size: BATCH_SIZE,
@@ -463,11 +464,13 @@ where
         );
 
         let qc_high = self.liveness_storage().get_qc_high();
+        let ctx = Context::single(
+            self.id.clone(),
+            self.elector.get_leader(self.view).to_string(),
+            self.view,
+        );
         self.emit_peer_event(PeerEvent::NewView {
-            ctx: Context {
-                from: self.id.clone(),
-                view: self.view,
-            },
+            ctx,
             qc_high: Box::new(qc_high.as_ref().clone()),
         })
         .await

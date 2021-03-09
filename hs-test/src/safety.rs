@@ -87,7 +87,7 @@ mod test {
         //              |       corrupted        |
         // init <--- a1 <--- a2 <--- a3 <--- a4
         //              <--- b1 <--- b2 <--- b3
-        //             |        correct         |
+        //              |        correct         |
         //
         // Machine should validate qc independently.
         // all of a2, a3, a4 should be rejected due to corrupted qc.
@@ -219,6 +219,7 @@ mod test {
         //
         // init <-- a1 <--- a2 ---X--- a3
         //
+        //
         // Machine should validate vote independently.
         // Steps:
         // 1. Leader propose a3 based on a2 and recv 2 vote already (leader inclueded).
@@ -242,6 +243,8 @@ mod test {
 
         // new leader propose a3 and sign to it!
         mhs.testee_make_proposal(format!("a3"));
+
+        mhs.check_hotstuff_state_with(&ExpectedState::QcHighOf(format!("a2")));
 
         mhs.testee_recv_votes(vec![
             MockEvent::AcceptedVote(2, format!("a3")),
@@ -298,10 +301,11 @@ mod test {
         let (a6, _) = branch.last().unwrap();
 
         let output = mhs.testee().process_safety_event(SafetyEvent::RecvProposal(
-            Context {
-                from: format!("{}", leader),
-                view: a6.height(),
-            },
+            Context::single(
+                format!("replica-{}", leader),
+                format!("replica-{}", testee),
+                a6.height(),
+            ),
             std::sync::Arc::new(a6.as_ref().clone()),
         ));
 

@@ -260,7 +260,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         let prop = self.make_leaf(&cmds);
         self.storage.update_leaf(&prop);
         // let justify = self.storage.get_qc_high();
-        let ctx = self.get_context();
+        let ctx = Context::broadcast(self.self_id.clone(), self.storage().get_view());
 
         let sign_kit = self.voter.sign(&prop);
         self.voter.add_vote(&ctx, &sign_kit).unwrap();
@@ -278,7 +278,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
             return Ok(Ready::Nil);
         }
 
-        info!("recv partial sign from {}", &ctx.from);
+        info!("recv vote from {}, prop.view={}", &ctx.from, prop.height());
         // vote at most once.
         if self.voter.vote_set_size() > self.threshold() {
             //self.compute_combined_sign();
@@ -306,7 +306,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     // TODO: add validating
     fn on_recv_proposal(
         &mut self,
-        _: &Context,
+        ctx: &Context,
         prop: &TreeNode,
         justify: &GenericQC,
     ) -> Result<Ready> {
@@ -324,10 +324,11 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 let sign_kit = self.voter.sign(&prop);
 
                 ready = Ready::Signature(
-                    Context {
-                        view: self.storage.get_view(),
-                        from: self.self_id.clone(),
-                    },
+                    Context::single(
+                        self.self_id.clone(),
+                        ctx.from.clone(),
+                        self.storage().get_view(),
+                    ),
                     Arc::new(prop.clone()),
                     Box::new(sign_kit),
                 );
@@ -365,7 +366,10 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         match req {
             SafetyEvent::RequestSnapshot => {
                 let ss = self.take_snapshot();
-                Ok(Ready::InternalState(self.get_context(), ss))
+                Ok(Ready::InternalState(
+                    Context::broadcast(self.self_id.clone(), self.storage().get_view()),
+                    ss,
+                ))
             }
             SafetyEvent::RecvProposal(ctx, proposal) => {
                 self.on_recv_proposal(&ctx, proposal.as_ref(), proposal.as_ref().justify())
@@ -388,7 +392,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 }
                 Ok(Ready::Nil)
             }
-            SafetyEvent::ViewChange(leader, view) => self.on_view_change(leader, view),
+            // SafetyEvent::ViewChange(leader, view) => self.on_view_change(leader, view),
             SafetyEvent::BranchSync(_, branch) => self.on_branch_sync(branch),
             _ => {
                 error!("recv invalid msg");
@@ -429,17 +433,13 @@ impl<S: SafetyStorage> Machine<S> {
         (self.total << 1) / 3
     }
 
-    fn get_context(&self) -> Context {
-        Context {
-            from: self.self_id.clone(),
-            view: self.storage.get_view(),
-        }
-    }
-
     fn form_update_qc_high(&self) -> Ready {
         // Note
         // leaf.qc == qc-high
-        Ready::UpdateQCHigh(self.get_context(), self.storage.get_leaf())
+        Ready::UpdateQCHigh(
+            Context::response(self.self_id.clone(), self.storage.get_view()),
+            self.storage.get_leaf(),
+        )
     }
 
     fn verify_proposal(&self, justify: &GenericQC) -> Result<Ready> {

@@ -81,13 +81,9 @@ impl<S: Signaturer> Voter<S> {
     }
 
     pub fn add_vote(&mut self, ctx: &Context, sign: &SignKit) -> Result<(), VoteErr> {
-        if ctx.view != self.view {
-            return Err(VoteErr::IncompatibleVote(ctx.from.clone(), ctx.view));
-        } else {
-            match self.voting_set.insert(ctx.from.clone(), sign.clone()) {
-                None => Ok(()),
-                Some(_) => Err(VoteErr::DuplicateVote(ctx.from.clone())),
-            }
+        match self.voting_set.insert(ctx.from.clone(), sign.clone()) {
+            None => Ok(()),
+            Some(_) => Err(VoteErr::DuplicateVote(ctx.from.clone())),
         }
     }
 

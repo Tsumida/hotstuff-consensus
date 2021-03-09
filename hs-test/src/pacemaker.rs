@@ -31,6 +31,7 @@ mod test {
     ];
 
     const CHANNEL_SIZE: usize = 128;
+    const DEFAULT_LEADER: usize = 1;
     const DEFAULT_TESTEE: usize = 0;
     const DEFAULT_SIZE: usize = 4;
     const DEFAULT_TH: usize = (DEFAULT_SIZE << 1) / 3;
@@ -53,10 +54,11 @@ mod test {
             for prop in props.into_iter() {
                 self.pe_sender
                     .send(PeerEvent::NewProposal {
-                        ctx: Context {
-                            view: prop.height(),
-                            from: from.clone(),
-                        },
+                        ctx: Context::single(
+                            format!("replica-{}", DEFAULT_LEADER),
+                            format!("replica-{}", DEFAULT_TESTEE),
+                            prop.height(),
+                        ),
                         prop: Box::new(prop.clone()),
                     })
                     .await
@@ -283,7 +285,7 @@ mod test {
                             INIT_QC.clone(),
                         );
                         PeerEvent::Timeout {
-                            ctx: Context { from, view: v },
+                            ctx: Context::broadcast(from, v),
                             tc,
                         }
                     })
