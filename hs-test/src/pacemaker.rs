@@ -8,6 +8,7 @@ mod test {
         INIT_NODE_HASH, INIT_QC, SK,
     };
     use hss::HotstuffStorage;
+    use log::error;
     use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
     use threshold_crypto::{PublicKeySet, SecretKeySet};
 
@@ -210,7 +211,11 @@ mod test {
                             res
                         }
                         PeerEvent::Timeout { tc, .. } => tc.view() < view,
-                        _ => false,
+                        PeerEvent::NewView { .. } => true,
+                        p => {
+                            error!("unexcepted event: {:?}", p);
+                            false
+                        }
                     })
                     .await;
 

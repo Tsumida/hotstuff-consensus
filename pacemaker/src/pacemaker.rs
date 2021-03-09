@@ -1,8 +1,8 @@
-use crate::network::NetworkAdaptor;
 use crate::{
     data::{BranchSyncStrategy, PeerEvent, SyncStatus, TimeoutCertificate},
     elector::RoundRobinLeaderElector,
     liveness_storage::LivenessStorage,
+    network::*,
     timer::{DefaultTimer, TimeoutEvent},
 };
 use cryptokit::DefaultSignaturer;
