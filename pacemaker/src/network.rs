@@ -64,7 +64,6 @@ impl NetworkAdaptor {
                     // process incoming peer event
                     Ok(byte_len) = stream.read_u32() => {
                         buf.resize_with(byte_len as usize, Default::default);
-
                         if let Err(e) = stream.read_exact(&mut buf).await{
                             error!{"{:?}", e};
                             continue;

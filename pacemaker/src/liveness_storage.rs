@@ -52,6 +52,8 @@ pub trait LivenessStorage {
 
     /// Leaf carries qc-high
     fn get_leaf(&self) -> &TreeNode;
+
+    fn increase_view(&mut self, new_view: ViewNumber);
 }
 
 #[async_trait::async_trait]

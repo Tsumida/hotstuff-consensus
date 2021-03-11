@@ -17,11 +17,8 @@ futures = "0.3"
 tokio = { version = "1.1", features = ["full"] }
 log = ""
 futures-timer = ""
-rand = ""
+rand = "=0.7.3"
 simplelog = ""
 thiserror = ""
 async-trait = ""
 
-
-[[bin]]
-name = "bootstrap"

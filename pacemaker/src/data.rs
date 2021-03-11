@@ -132,7 +132,10 @@ pub enum PeerEvent {
         ctx: Context,
         cont: String,
     },
-    // Proposal from leader. May be stale.
+    /// This method may be used for 2 cases:
+    /// - case 1: Leader broadcasts new proposal to all replicas.
+    /// - case 2: Replica received new proposal from leader.
+    ///  
     NewProposal {
         ctx: Context,
         prop: Box<TreeNode>,

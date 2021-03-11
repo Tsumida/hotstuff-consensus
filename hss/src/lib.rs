@@ -624,7 +624,14 @@ impl HotstuffStorage {
 
         let mut tx = self.backend.as_ref().unwrap().conn_pool.begin().await?;
         // flush proposal queue;
-        debug!("prop queue size = {}", self.prop_queue.len());
+        debug!(
+            "queue size - prop={}, qc={}, ptc={}, ctc={}",
+            self.prop_queue.len(),
+            self.justify_queue.len(),
+            self.partial_tc_queue.len(),
+            self.combined_tc_queue.len()
+        );
+        // flush prop and justify
         while let Some(prop) = self.prop_queue.pop_front() {
             let view = prop.height();
             let parent_hash: String = base64::encode(prop.parent_hash());
@@ -689,6 +696,10 @@ impl HotstuffStorage {
             .unwrap();
         }
 
+        // todo: flush ptc
+
+        // todo: flush ctc
+
         // flush state
         sqlx::query(
             "
@@ -709,7 +720,7 @@ impl HotstuffStorage {
         .unwrap();
 
         let res = tx.commit().await;
-        info!("flush done. ");
+        info!("flush ");
         self.reset_dirty();
         res
     }
@@ -1043,5 +1054,9 @@ impl LivenessStorage for HotstuffStorage {
 
     fn get_leaf(&self) -> &TreeNode {
         self.state.leaf.as_ref()
+    }
+
+    fn increase_view(&mut self, new_view: ViewNumber) {
+        <Self as SafetyStorage>::increase_view(self, new_view);
     }
 }

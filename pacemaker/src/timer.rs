@@ -31,7 +31,10 @@ pub(crate) struct DefaultTimer {
 
 impl DefaultTimer {
     pub(crate) fn timeout_by_delay(&self) -> Duration {
-        Duration::from_millis(u64::min(self.max_timeout, self.rtt.wrapping_shl(1)))
+        Duration::from_millis(u64::min(
+            self.max_timeout,
+            self.rtt.wrapping_shl(1) + rand::random::<u64>() % 500,
+        ))
     }
 
     pub(crate) fn timout_on_gap(&self, alpha: u64, beta: u64, gap: usize) -> Duration {

@@ -182,7 +182,7 @@ where
                     self.process_network_event(net_event).await?;
                 },
                 Some(te) = self.timeout_ch.recv() => {
-                    self.process_timeout_evnet(te).await?;
+                    self.process_timeout_event(te).await?;
                 },
             }
             if quit {
@@ -200,7 +200,7 @@ where
         Ok(())
     }
 
-    async fn process_timeout_evnet(&mut self, te: TimeoutEvent) -> io::Result<()> {
+    async fn process_timeout_event(&mut self, te: TimeoutEvent) -> io::Result<()> {
         match te {
             TimeoutEvent::ViewTimeout(view) => self.process_local_timeout(view).await,
         }
@@ -211,6 +211,10 @@ where
             // emit timeout event and save tc.
             let qc_high = self.liveness_storage().get_qc_high().as_ref().clone();
             let tc = self.sign_tc(self.view, qc_high);
+
+            // right now, we will send timeout through rpc.
+            // need in the future.
+
             self.emit_peer_event(PeerEvent::Timeout {
                 ctx: Context::broadcast(self.id.clone(), self.view),
                 tc: tc.clone(),
@@ -218,13 +222,17 @@ where
             .await
             .unwrap();
 
-            self.liveness_storage().append_tc(tc).unwrap();
+            // self.liveness_storage().append_tc(tc).unwrap();
 
             // goto new view and reset timer.
             // if view == self.view -> goto self.view + 1
             // if view  > self.view -> goto view
             self.goto_new_view(ViewNumber::max(view, self.view + 1))
                 .await?;
+
+            // persist current-view
+            let current_view = self.view;
+            LivenessStorage::increase_view(self.liveness_storage(), current_view);
             info!("timeout and goto view {}", self.view);
 
             // Reuse local timeout event for branch synchronizing timeout.
