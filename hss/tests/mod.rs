@@ -5,10 +5,7 @@ mod hss_test {
 
     use cryptokit::DefaultSignaturer;
     use hotstuff_rs::safety::machine::SafetyStorage;
-    use hs_data::{
-        form_chain, threshold_sign_kit, CombinedSign, GenericQC, NodeHash, Sign, TreeNode, Txn,
-        INIT_NODE, INIT_NODE_HASH, PK, SK,
-    };
+    use hs_data::{form_chain, threshold_sign_kit, INIT_NODE, INIT_NODE_HASH};
     use hss::HotstuffStorage;
     use std::future::Future;
 
@@ -16,7 +13,9 @@ mod hss_test {
         use simplelog::*;
         let _ = CombinedLogger::init(vec![TermLogger::new(
             LevelFilter::Debug,
-            Config::default(),
+            ConfigBuilder::new()
+                .add_filter_allow(format!("sqlx"))
+                .build(),
             TerminalMode::Mixed,
         )]);
     }
@@ -97,7 +96,7 @@ mod hss_test {
 
         drop(hss);
 
-        let mut hss2 = hss_with_mysql_enabled(
+        let mut hss2 = recover_hss_with_mysql_enabled(
             format!("test"),
             "mysql://root:helloworld@localhost:3306/hotstuff_test_mocker",
         )

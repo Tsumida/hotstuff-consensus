@@ -6,8 +6,11 @@ use crate::{
     timer::{DefaultTimer, TimeoutEvent},
 };
 use cryptokit::DefaultSignaturer;
-use hotstuff_rs::safety::machine::{self, Machine, Ready, Safety, SafetyEvent, SafetyStorage};
-use hs_data::{msg::Context, GenericQC, ReplicaID, SignKit, ViewNumber};
+use futures::Future;
+use hotstuff_rs::safety::machine::{
+    self, Machine, Ready, Safety, SafetyEvent, SafetyStorage, Snapshot,
+};
+use hs_data::{msg::Context, GenericQC, ReplicaID, SignKit, TreeNode, Txn, ViewNumber};
 use std::{
     collections::{BinaryHeap, VecDeque},
     io,
@@ -102,7 +105,7 @@ where
     // pacemaker identifier
     view: ViewNumber,
     id: ReplicaID,
-    pub elector: crate::elector::RoundRobinLeaderElector,
+    elector: crate::elector::RoundRobinLeaderElector,
 
     signaturer: DefaultSignaturer,
 
@@ -110,7 +113,7 @@ where
     ready_queue: VecDeque<Ready>,
     pending_prop: BinaryHeap<SafetyEventWrapper>,
 
-    pub sync_state: Arc<AtomicU8>,
+    sync_state: Arc<AtomicU8>,
 
     net_adaptor: NetworkAdaptor,
 
@@ -255,20 +258,23 @@ where
     }
 
     // todo
-    async fn process_network_event(&mut self, net_event: PeerEvent) -> io::Result<()> {
+    pub async fn process_network_event(&mut self, net_event: PeerEvent) -> io::Result<()> {
         match net_event {
             PeerEvent::NewProposal { ctx, prop } => {
+                /*
                 if self.liveness_storage().is_qc_node_exists(prop.justify()) {
+                    // refactor: remove this branch
                     self.emit_safety_event(SafetyEvent::RecvProposal(ctx, Arc::new(*prop)));
                 } else {
-                    self.pending_prop.push(SafetyEventWrapper::from(
-                        // use prop.justify.view, not prop.height
-                        prop.justify().view(),
-                        SafetyEvent::RecvProposal(ctx, Arc::new(*prop)),
-                    ));
-                    let height = LivenessStorage::get_leaf(self.liveness_storage()).height();
-                    self.check_pending_prop(height).await?;
-                }
+                    */
+
+                self.pending_prop.push(SafetyEventWrapper::from(
+                    // use prop.justify.view, not prop.height
+                    prop.justify().view(),
+                    SafetyEvent::RecvProposal(ctx, Arc::new(*prop)),
+                ));
+                let height = LivenessStorage::get_leaf(self.liveness_storage()).height();
+                self.check_pending_prop(height).await?;
             }
             PeerEvent::AcceptProposal { ctx, prop, sign } => {
                 if let Some(sign) = sign {
@@ -333,11 +339,12 @@ where
         Ok(())
     }
 
-    async fn process_ready_event(&mut self, ready: machine::Ready) -> io::Result<()> {
+    pub async fn process_ready_event(&mut self, ready: machine::Ready) -> io::Result<()> {
         match ready {
             machine::Ready::Nil => {}
             machine::Ready::InternalState(_, _) => {}
             machine::Ready::NewProposal(ctx, prop) => {
+                // Brocast new proposal to all replicas.
                 self.emit_peer_event(PeerEvent::NewProposal {
                     ctx,
                     prop: Box::new(prop.as_ref().clone()),
@@ -385,7 +392,7 @@ where
     }
 
     /// Check pending queue, start branch synchronization if there are proposals lack of `justify.node` .
-    async fn check_pending_prop(&mut self, leaf_height: ViewNumber) -> io::Result<()> {
+    pub async fn check_pending_prop(&mut self, leaf_height: ViewNumber) -> io::Result<()> {
         if let Some(sw) = self.pending_prop.pop() {
             let justify_view = -sw.view as ViewNumber;
             if justify_view <= leaf_height {
@@ -432,7 +439,7 @@ where
     }
 
     // todo: consider use Pacemaker Error
-    async fn emit_peer_event(&mut self, pe: PeerEvent) -> io::Result<()> {
+    pub async fn emit_peer_event(&mut self, pe: PeerEvent) -> io::Result<()> {
         let dur = self.timer.timeout_by_delay();
         if let Err(_) = self.net_adaptor.event_sender.send_timeout(pe, dur).await {
             error!("pacemaker -> network adaptor block and timeout");
@@ -443,7 +450,7 @@ where
 
     #[inline]
     /// Communicate with Machine.
-    fn emit_safety_event(&mut self, se: SafetyEvent) {
+    pub fn emit_safety_event(&mut self, se: SafetyEvent) {
         // self.machine_adaptor.safety().send(se).await.unwrap();
         match self.machine.process_safety_event(se) {
             Ok(ready) => {
@@ -498,4 +505,74 @@ where
 
         TimeoutCertificate::new(self.id.clone(), self.view, sign_kit, qc_high)
     }
+
+    /// Expose safety module.
+    pub fn safety_module(&mut self) -> &mut dyn Safety {
+        &mut self.machine
+    }
+}
+
+use tokio::sync::oneshot;
+
+#[derive(Debug, Clone)]
+pub struct PacemakerState {
+    pub replica_id: ReplicaID,
+    pub current_view: ViewNumber,
+    pub current_leader: Option<ReplicaID>,
+    pub machine_snapshot: Snapshot,
+}
+
+/// Event loop for pacemaker with observer, informer and queue for new coming tx.
+pub async fn event_loop_with_functions<S: SafetyStorage + LivenessStorage + Send + Sync>(
+    mut pm: Pacemaker<S>,
+    mut quit_ch: TchanR<()>,
+    mut observe_fn: impl Fn() -> Option<oneshot::Sender<PacemakerState>>,
+    mut inform_fn: impl Fn(Arc<TreeNode>),
+    mut fetch: impl Fn() -> Option<Vec<Txn>>,
+) -> std::io::Result<()> {
+    info!("pacemaker up");
+    let mut quit = false;
+
+    pm.goto_new_view(pm.view + 1).await?;
+
+    let mut interval = tokio::time::interval(Duration::from_millis(2000));
+    interval.tick().await;
+
+    while !quit {
+        if let Some(cmds) = fetch() {
+            let ready = pm.safety_module().on_beat(cmds);
+            match ready {
+                Ok(ready) => pm.ready_queue.push_back(ready),
+                Err(e) => error!("unexpected output {:?}", e),
+            }
+        }
+
+        tokio::select! {
+            // pm event.
+            _ = interval.tick() => {
+                // refactor
+                LivenessStorage::flush(pm.liveness_storage()).await.unwrap();
+
+                while let Some(ready) = pm.ready_queue.pop_front(){
+                    pm.process_ready_event(ready).await.unwrap();
+                }
+            },
+            Some(()) = quit_ch.recv() => {
+                quit = true;
+            },
+            Some(net_event) = pm.net_adaptor.event_recvr.recv() => {
+                pm.process_network_event(net_event).await?;
+            },
+            Some(te) = pm.timeout_ch.recv() => {
+                pm.process_timeout_event(te).await?;
+            },
+        }
+    }
+
+    // refactor
+    info!("flushing...");
+    LivenessStorage::flush(pm.liveness_storage()).await.unwrap();
+
+    info!("pacemaker down");
+    Ok(())
 }

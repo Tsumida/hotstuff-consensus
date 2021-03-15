@@ -771,7 +771,7 @@ dependencies = [
  "hotstuff-rs",
  "hs-data",
  "log",
- "rand 0.8.3",
+ "rand 0.7.3",
  "serde",
  "serde_json",
  "simplelog",

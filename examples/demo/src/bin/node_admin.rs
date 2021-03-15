@@ -151,6 +151,7 @@ fn main() {
             let mut pm =
                 init_hotstuff_node(token, num, replica_id, db, peer_addrs, signaturer).await;
             let (_, quit_ch) = tokio::sync::mpsc::channel(1);
+
             pm.run(quit_ch).await.unwrap();
         });
 }

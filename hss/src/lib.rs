@@ -30,13 +30,13 @@ fn map_row_to_proposal(row: MySqlRow) -> (NodeHash, Arc<TreeNode>) {
     let parent_hash: String = row.get(1);
     // let justify_view: ViewNumber = row.get(2);
     // let prop_hash: String = row.get(3);
-    let tx: String = row.get(4);
+    let tx: Vec<u8> = row.get(4);
     let node_hash: NodeHash =
         NodeHash::from_vec(&base64::decode(&row.get::<String, _>(6)).unwrap());
     let combined_sign: String = row.get(7);
     let node = Arc::new(TreeNode {
         height: view,
-        txs: serde_json::from_str(&tx).unwrap(),
+        txs: serde_json::from_slice(&tx).unwrap(),
         parent: NodeHash::from_vec(&base64::decode(&parent_hash).unwrap()),
         justify: GenericQC::new(
             view,
@@ -69,7 +69,7 @@ async fn recover_tc_map(
     conn_pool: &MySqlPool,
 ) -> BTreeMap<ViewNumber, HashSet<TimeoutCertificate>> {
     let mut tc_map = BTreeMap::new();
-    sqlx::query("select view, partial_tc from partial_tc;")
+    sqlx::query("select view, partial_sign from partial_tc;")
         .fetch_all(conn_pool)
         .await
         .unwrap()
@@ -78,7 +78,6 @@ async fn recover_tc_map(
             let view: ViewNumber = row.get(0);
             let tc: TimeoutCertificate =
                 serde_json::from_str(&row.get::<String, usize>(1)).unwrap();
-
             let tcs = tc_map.entry(view).or_insert(HashSet::new());
             tcs.insert(tc);
         });
@@ -88,12 +87,12 @@ async fn recover_tc_map(
 
 async fn recover_hotstuff_config(conn_pool: &MySqlPool) -> HotStuffConfig {
     let (token, total, replica_id, addr) =
-        sqlx::query("select token, total, self_id, self_addr from hotstuff_conf limit 1; ")
+        sqlx::query("select token, total, self_addr, self_id from hotstuff_conf limit 1; ")
             .map(|row: MySqlRow| {
                 let token: String = row.get(0);
                 let total: usize = row.get::<u64, _>(1) as usize;
-                let replica_id: String = row.get(2);
-                let addr: String = row.get(4);
+                let addr: String = row.get(2);
+                let replica_id: String = row.get(3);
 
                 (token, total, replica_id, addr)
             })
@@ -149,11 +148,30 @@ async fn recover_hotstuff_state(conn_pool: &MySqlPool) -> InMemoryState {
             .await
             .unwrap();
 
-    let (_, leaf) = get_one_node_by_view(conn_pool, leaf_view).await.unwrap();
-    let (_, b_locked) = get_one_node_by_view(conn_pool, locked_view).await.unwrap();
-    let (_, b_executed) = get_one_node_by_view(conn_pool, executed_view)
-        .await
-        .unwrap();
+    // refactor: stablized INIT_NODE
+    let leaf = if leaf_view > 0 {
+        get_one_node_by_view(conn_pool, leaf_view).await.unwrap().1
+    } else {
+        Arc::new(INIT_NODE.clone())
+    };
+
+    let b_locked = if locked_view > 0 {
+        get_one_node_by_view(conn_pool, locked_view)
+            .await
+            .unwrap()
+            .1
+    } else {
+        Arc::new(INIT_NODE.clone())
+    };
+
+    let last_commit = if executed_view > 0 {
+        get_one_node_by_view(conn_pool, executed_view)
+            .await
+            .unwrap()
+            .1
+    } else {
+        Arc::new(INIT_NODE.clone())
+    };
 
     let qc_high = Arc::new(leaf.justify().clone());
 
@@ -164,24 +182,25 @@ async fn recover_hotstuff_state(conn_pool: &MySqlPool) -> InMemoryState {
         vheight,
         current_view,
         committed_height,
-        b_executed,
+        last_commit,
         b_locked,
     };
 
     state
 }
 
-async fn recover_signaturer(conn_pool: &MySqlPool) -> DefaultSignaturer {
+async fn recover_signaturer(token: &String, conn_pool: &MySqlPool) -> DefaultSignaturer {
     sqlx::query("select pk_set, sk_share, sk_id from crypto where token = ? limit 1; ")
+        .bind(token)
         .map(|row: MySqlRow| {
-            let pk_set: String = row.get(0);
-            let sk_share: String = row.get(1);
+            let pk_set: Vec<u8> = row.get(0);
+            let sk_share: Vec<u8> = row.get(1);
             let sk_id: u64 = row.get(2);
 
             DefaultSignaturer {
                 sign_id: sk_id as usize,
-                pks: serde_json::from_str(&pk_set).unwrap(),
-                sks: serde_json::from_str::<SerdeSecret<SK>>(&sk_share)
+                pks: serde_json::from_slice(&pk_set).unwrap(),
+                sks: serde_json::from_slice::<SerdeSecret<SK>>(&sk_share)
                     .unwrap()
                     .0,
             }
@@ -209,7 +228,7 @@ async fn create_tables(conn_pool: &MySqlPool) {
             `token`    varchar(64) NOT NULL ,
             `pk_set`   blob NOT NULL ,
             `sk_share` blob NOT NULL ,
-            `sk_id`    bigint NOT NULL ,
+            `sk_id`    bigint unsigned NOT NULL ,
 
             PRIMARY KEY (`token`)
             )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -234,7 +253,7 @@ async fn create_tables(conn_pool: &MySqlPool) {
             `locked_view`     bigint unsigned NOT NULL ,
             `committed_view`  bigint unsigned NOT NULL ,
             `executed_view`   bigint unsigned NOT NULL ,
-            `leaf_view`       bigint NOT NULL ,
+            `leaf_view`       bigint unsigned NOT NULL ,
 
             PRIMARY KEY (`token`)
             )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -319,7 +338,7 @@ pub struct InMemoryState {
     committed_height: ViewNumber,
 
     // Lasted executed proposal.
-    b_executed: Arc<TreeNode>,
+    last_commit: Arc<TreeNode>,
 
     // Last locked proposal.
     b_locked: Arc<TreeNode>,
@@ -414,6 +433,8 @@ pub struct HotstuffStorage {
     combined_tc_queue: VecDeque<TimeoutCertificate>,
     partial_tc_queue: VecDeque<TimeoutCertificate>,
 
+    new_view_set: HashMap<ReplicaID, Arc<GenericQC>>,
+
     /// consider case: `3<-4<-4`
     /// proposal `3<-4` should be appended into prop_queue and
     /// the second 4's qc should be appended into justify_queue.
@@ -456,7 +477,7 @@ impl HotstuffStorage {
                 current_view: 0,
                 vheight: 0,
                 committed_height: 0,
-                b_executed: Arc::new(init_node.clone()),
+                last_commit: Arc::new(init_node.clone()),
                 b_locked: Arc::new(init_node.clone()),
                 // safety related
                 leaf: Arc::new(init_node.clone()),
@@ -472,6 +493,7 @@ impl HotstuffStorage {
             prop_queue: VecDeque::with_capacity(8),
             justify_queue: VecDeque::with_capacity(8),
             dirty: false,
+            new_view_set: HashMap::new(),
         };
         // storage.append_new_node(init_node);
         storage
@@ -510,9 +532,9 @@ impl HotstuffStorage {
         .unwrap();
 
         // refactor
-        let pk_set = serde_json::to_string(&self.signaturer.pks).unwrap();
-        let sk_share: SerdeSecret<SK> = SerdeSecret(self.signaturer.sks.clone());
-        let encoded_sks = serde_json::to_string(&sk_share).unwrap();
+        let pk_set = serde_json::to_vec(&self.signaturer.pks).unwrap();
+        let sk_share: SerdeSecret<SK> = SerdeSecret(self.signaturer.sks.clone()); // panic if type == String
+        let encoded_sks = serde_json::to_vec(&sk_share).unwrap();
         debug!("pk set size = {} Byte", pk_set.len());
 
         // init crypto
@@ -583,7 +605,7 @@ impl HotstuffStorage {
 
         // recover crypto
         let st_4 = SystemTime::now();
-        let signaturer = recover_signaturer(&conn_pool).await;
+        let signaturer = recover_signaturer(&token, &conn_pool).await;
         dur_recover_state = SystemTime::now().duration_since(st_4).unwrap();
         info!(
             "recover signaturer, took {} ms",
@@ -611,6 +633,7 @@ impl HotstuffStorage {
             prop_queue: VecDeque::with_capacity(8),
             justify_queue: VecDeque::with_capacity(8),
             dirty: false,
+            new_view_set: HashMap::new(),
         }
     }
 
@@ -637,7 +660,7 @@ impl HotstuffStorage {
             let parent_hash: String = base64::encode(prop.parent_hash());
             let node_hash = base64::encode(prop.justify().node_hash());
             let sign = base64::encode(prop.justify().combined_sign().to_bytes());
-            let txn = serde_json::to_string(&prop.tx()).unwrap();
+            let txn = serde_json::to_vec(prop.tx()).unwrap();
 
             // Note that previous flush may insert a qc with the same view.
             sqlx::query(
@@ -682,7 +705,7 @@ impl HotstuffStorage {
             // The previous proposal flushing may insert a qc with the same view.
             sqlx::query(
                 "
-                    insert ignore into qc, 
+                    insert ignore into qc 
                     (view, node_hash, combined_sign)
                     values
                     (?, ?, ?)
@@ -697,8 +720,39 @@ impl HotstuffStorage {
         }
 
         // todo: flush ptc
+        while let Some(ptc) = self.partial_tc_queue.pop_front() {
+            sqlx::query(
+                "
+                insert ignore into partial_tc
+                (view, replica_id, partial_sign)
+                values
+                (?, ?, ?)
+                ",
+            )
+            .bind(ptc.view())
+            .bind(ptc.from())
+            .bind(serde_json::to_string(ptc.view_sign()).unwrap())
+            .execute(&mut tx)
+            .await
+            .unwrap();
+        }
 
         // todo: flush ctc
+        while let Some(ctc) = self.combined_tc_queue.pop_front() {
+            sqlx::query(
+                "
+                insert ignore into combined_tc
+                (view, combined_sign)
+                values
+                (?, ?);
+                ",
+            )
+            .bind(ctc.view())
+            .bind(serde_json::to_string(ctc.view_sign()).unwrap())
+            .execute(&mut tx)
+            .await
+            .unwrap();
+        }
 
         // flush state
         sqlx::query(
@@ -713,7 +767,7 @@ impl HotstuffStorage {
         .bind(self.state.vheight)
         .bind(self.state.b_locked.height())
         .bind(self.state.committed_height)
-        .bind(self.state.b_executed.height())
+        .bind(self.state.last_commit.height())
         .bind(self.state.leaf.height())
         .execute(&mut tx)
         .await
@@ -725,6 +779,7 @@ impl HotstuffStorage {
         res
     }
 
+    #[inline]
     pub fn threshold(&self) -> usize {
         (self.conf.total << 1) / 3
     }
@@ -820,10 +875,12 @@ impl SafetyStorage for HotstuffStorage {
 
     /// Persistent
     fn update_leaf(&mut self, new_leaf: &TreeNode) {
+        let hash = TreeNode::hash(new_leaf);
         self.state.vheight = new_leaf.height();
         self.state.leaf = Arc::new(new_leaf.clone());
         self.in_mem_queue
-            .insert(TreeNode::hash(new_leaf), self.state.leaf.clone());
+            .insert(hash.clone(), self.state.leaf.clone());
+        self.insert(hash, self.state.leaf.clone());
         self.set_dirty();
     }
 
@@ -891,14 +948,8 @@ impl SafetyStorage for HotstuffStorage {
         self.set_dirty();
     }
 
-    fn get_last_executed(&self) -> Arc<TreeNode> {
-        self.state.b_executed.clone()
-    }
-
-    // Persistent
-    fn update_last_executed_node(&mut self, node: &TreeNode) {
-        self.state.b_executed = Arc::new(node.clone());
-        self.set_dirty();
+    fn get_last_committed(&self) -> Arc<TreeNode> {
+        self.state.last_commit.clone()
     }
 
     fn get_view(&self) -> ViewNumber {
@@ -959,7 +1010,7 @@ impl SafetyStorage for HotstuffStorage {
             // TODO:execute,
             self.state.committed_height = h;
         }
-        self.state.b_executed = Arc::new(to_commit.clone());
+        self.state.last_commit = Arc::new(to_commit.clone());
         self.set_dirty();
 
         info!(
@@ -1058,5 +1109,18 @@ impl LivenessStorage for HotstuffStorage {
 
     fn increase_view(&mut self, new_view: ViewNumber) {
         <Self as SafetyStorage>::increase_view(self, new_view);
+    }
+
+    fn new_view_set(&mut self) -> &mut HashMap<ReplicaID, Arc<GenericQC>> {
+        &mut self.new_view_set
+    }
+
+    #[inline]
+    fn get_threshold(&mut self) -> usize {
+        self.threshold()
+    }
+
+    fn clean_new_view_set(&mut self) {
+        self.new_view_set.clear()
     }
 }

@@ -3,7 +3,7 @@
 
 use cryptokit::DefaultSignaturer;
 use hotstuff_rs::safety::{machine::Machine, voter::Voter};
-use hs_data::{combined_sign_from_vec_u8, ReplicaID, INIT_NODE, INIT_NODE_HASH, PK};
+use hs_data::{ReplicaID, INIT_NODE, INIT_NODE_HASH, PK};
 use hs_network::HotStuffProxy;
 use hss::HotstuffStorage;
 use pacemaker::{elector::RoundRobinLeaderElector, pacemaker::Pacemaker};
