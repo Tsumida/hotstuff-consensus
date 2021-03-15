@@ -14,7 +14,8 @@ mod hss_test {
         let _ = CombinedLogger::init(vec![TermLogger::new(
             LevelFilter::Debug,
             ConfigBuilder::new()
-                .add_filter_allow(format!("sqlx"))
+                .add_filter_ignore_str("sqlx")
+                .add_filter_ignore_str("rustls")
                 .build(),
             TerminalMode::Mixed,
         )]);
@@ -88,7 +89,6 @@ mod hss_test {
         );
 
         for (_, node) in &chain[..4] {
-            println!("{}", node.height());
             hss.append_new_node(node);
         }
 
@@ -103,9 +103,9 @@ mod hss_test {
         .await;
 
         for (_, node) in &chain[4..] {
-            println!("{}", node.height());
             hss2.append_new_node(node);
         }
+        hss2.async_flush().await.unwrap();
     }
 
     #[test]

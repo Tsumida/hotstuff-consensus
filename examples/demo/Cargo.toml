@@ -13,7 +13,7 @@ pacemaker = {path="../../pacemaker"}
 hss = {path="../../hss"}
 hs-network = {path="../../hs-network"}
 cryptokit = {path="../../cryptokit"}
-
+base64 = ""
 futures = "0.3"
 tokio = {version = "1.2", features=["full"]}
 log = ""
@@ -22,6 +22,7 @@ serde = ""
 serde_json = ""
 threshold_crypto = { version = "0.4", git = "https://github.com/poanetwork/threshold_crypto" }
 clap = ""
+warp = "0.3"
 
 [[bin]]
 name = "generate_sk"

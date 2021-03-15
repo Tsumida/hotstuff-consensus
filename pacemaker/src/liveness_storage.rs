@@ -1,8 +1,10 @@
 //! Storage for liveness evnet, message.
 //!
 
+use std::{collections::HashMap, sync::Arc};
+
 use crate::data::{BranchData, BranchSyncStrategy, TimeoutCertificate};
-use hs_data::{GenericQC, TreeNode, ViewNumber};
+use hs_data::{GenericQC, ReplicaID, TreeNode, ViewNumber};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Error)]
@@ -54,6 +56,13 @@ pub trait LivenessStorage {
     fn get_leaf(&self) -> &TreeNode;
 
     fn increase_view(&mut self, new_view: ViewNumber);
+
+    /// Return true if the number of new-view msgs is at least `n-f`.
+    fn new_view_set(&mut self) -> &mut HashMap<ReplicaID, Arc<GenericQC>>;
+
+    fn clean_new_view_set(&mut self);
+
+    fn get_threshold(&mut self) -> usize;
 }
 
 #[async_trait::async_trait]

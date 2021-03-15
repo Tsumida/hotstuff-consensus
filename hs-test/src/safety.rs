@@ -217,12 +217,13 @@ mod test {
     #[test]
     fn test_corrupted_vote() {
         //
-        // init <-- a1 <--- a2 ---X--- a3
-        //
+        // init <-- a1 <--- a2 <--- a3
+        //                   ↑
+        //                   ------ a4
         //
         // Machine should validate vote independently.
         // Steps:
-        // 1. Leader propose a3 based on a2 and recv 2 vote already (leader inclueded).
+        // 1. Leader propose a4 based on a2 and recv 2 vote already (leader inclueded).
         // 2. Leader recv a corrupted vote and reject it.
         // 3. Leader recv a correct vote and then form qc.
 
@@ -241,23 +242,23 @@ mod test {
 
         mhs.testee_load_consecutive_proposals(vec![format!("a1"), format!("a2"), format!("a3")]);
 
-        // new leader propose a3 and sign to it!
-        mhs.testee_make_proposal(format!("a3"));
+        // new leader propose a4 and sign to it!
+        mhs.testee_make_proposal(format!("a4"));
 
         mhs.check_hotstuff_state_with(&ExpectedState::QcHighOf(format!("a2")));
 
         mhs.testee_recv_votes(vec![
-            MockEvent::AcceptedVote(2, format!("a3")),
-            MockEvent::CorruptedVote(adversial, format!("a3")),
+            MockEvent::AcceptedVote(2, format!("a4")),
+            MockEvent::CorruptedVote(adversial, format!("a4")),
         ]);
 
         mhs.check_hotstuff_state_with(&ExpectedState::QcHighOf(format!("a2")));
 
         // recv 3 vote and form qc.
-        mhs.testee_recv_votes(vec![MockEvent::AcceptedVote(3, format!("a3"))]);
+        mhs.testee_recv_votes(vec![MockEvent::AcceptedVote(3, format!("a4"))]);
 
         // if qc of a3 is formed, a3 will be new leaf.
-        mhs.check_hotstuff_state_with(&ExpectedState::QcHighOf(format!("a3")));
+        mhs.check_hotstuff_state_with(&ExpectedState::QcHighOf(format!("a4")));
     }
 
     #[test]

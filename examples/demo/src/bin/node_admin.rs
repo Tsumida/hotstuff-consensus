@@ -1,10 +1,23 @@
 //! Load config and start a hotstuff node.
-use std::{collections::HashMap, io::Read, process::exit};
+use std::{
+    collections::{HashMap, VecDeque},
+    io::Read,
+    net::SocketAddr,
+    process::exit,
+    sync::{Arc, Mutex, RwLock},
+};
 
 use clap::{App, Arg};
-use demo::{build_signaturer_from_string, init_hotstuff_node};
-use log::{info, LevelFilter};
-use simplelog::{CombinedLogger, Config, ConfigBuilder, TermLogger, TerminalMode, WriteLogger};
+use demo::{
+    build_signaturer_from_string, init_hotstuff_node, process_new_tx, NewTxRequest, NewTxResponse,
+    ServerSharedState, TX_STATE_INVALID, TX_STATE_PENDING,
+};
+use hs_data::{TreeNode, Txn};
+use hs_network::RpcResp;
+use log::{error, info, LevelFilter};
+use pacemaker::pacemaker::event_loop_with_functions;
+use simplelog::{CombinedLogger, ConfigBuilder, TermLogger, TerminalMode, WriteLogger};
+use warp::Filter;
 
 fn main() {
     // Example:
@@ -50,9 +63,15 @@ fn main() {
                 .takes_value(true)
                 .help("Specify database backend, for example an mysql db connnection. If this is empty, an in-memory stroage will be used and no durability is guaranteed."),
         )
+        .arg(
+            Arg::with_name("tx-server-addr")
+                // .short("d")
+                .long("--tx-server-addr")
+                .takes_value(true)
+                .help("Address for listening client requests."),
+        )
         .get_matches();
 
-    //
     let replica_id = matches.value_of("replica-id").unwrap().to_string();
 
     // recover signaturer
@@ -99,6 +118,12 @@ fn main() {
         .value_of("bootstrap")
         .expect("need bootstrap config");
 
+    let tx_server_addr: SocketAddr = matches
+        .value_of("tx-server-addr")
+        .expect("need --tx-server-addr")
+        .parse()
+        .expect("invalied arg: --tx-server-addr");
+
     let mut buf = String::with_capacity(1024);
     std::fs::File::open(path)
         .expect("can't open bootstrap config")
@@ -109,7 +134,7 @@ fn main() {
 
     // --------------------------------------------- check ---------------------------------------------
     if !peer_addrs.contains_key(&replica_id) {
-        println!("replica-id {} not in peer addrs config", &replica_id);
+        println!("replica{} not in peer addrs config", &replica_id);
         exit(-1);
     }
 
@@ -121,7 +146,10 @@ fn main() {
         );
     }
 
+    // --------------------------------------------- init ----------------------------------------------
+
     let _ = CombinedLogger::init(vec![
+        /*
         TermLogger::new(
             LevelFilter::Debug,
             ConfigBuilder::new()
@@ -129,7 +157,7 @@ fn main() {
                 .add_filter_ignore(format!("rustls"))
                 .build(),
             TerminalMode::Mixed,
-        ),
+        ),*/
         WriteLogger::new(
             LevelFilter::Debug,
             ConfigBuilder::new()
@@ -140,19 +168,59 @@ fn main() {
         ),
     ]);
 
-    // --------------------------------------------- init ----------------------------------------------
     let signaturer = build_signaturer_from_string(sk_id, sk_share, pk_set);
 
+    let shared_state = Arc::new(RwLock::new(ServerSharedState::default()));
+
+    let s1 = shared_state.clone();
+    let shared_state_fn = warp::any().map(move || s1.clone());
+
+    // server for submit new tx.
+    let server = warp::post()
+        .and(warp::path("new-tx"))
+        .and(warp::path::end())
+        .and(shared_state_fn.clone())
+        .and(warp::body::content_length_limit(2 << 20).and(warp::body::json()))
+        .and_then(process_new_tx);
+
+    // Informing new committed proposals
+    let inform_fn = |prop: Arc<TreeNode>| {
+        let mut sss_unlocked = shared_state.write().unwrap();
+        sss_unlocked.commit_queue.push_back(prop.as_ref().clone());
+    };
+
+    let observe_fn = || None;
+
+    let fetch = |enable_make_prop: bool| {
+        let mut ss = shared_state.write().unwrap();
+        if !enable_make_prop || ss.tx_queue.len() == 0 {
+            return None;
+        }
+        let mut txs = Vec::with_capacity(8);
+        for _ in 0..8 {
+            match ss.tx_queue.pop_front() {
+                Some(prop) => txs.push(prop),
+                None => break,
+            }
+        }
+        Some(txs)
+    };
+
     info!("init hotstuff node: {}-{}", token, replica_id);
-    // start hotstuff
+
+    // --------------------------------------------- run -----------------------------------------------
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(async move {
-            let mut pm =
-                init_hotstuff_node(token, num, replica_id, db, peer_addrs, signaturer).await;
+            let pm = init_hotstuff_node(token, num, replica_id, db, peer_addrs, signaturer).await;
             let (_, quit_ch) = tokio::sync::mpsc::channel(1);
 
-            pm.run(quit_ch).await.unwrap();
+            tokio::spawn(warp::serve(server).run(tx_server_addr));
+
+            // pm.run(quit_ch).await.unwrap();
+            event_loop_with_functions(pm, quit_ch, observe_fn, inform_fn, fetch)
+                .await
+                .unwrap();
         });
 }
 

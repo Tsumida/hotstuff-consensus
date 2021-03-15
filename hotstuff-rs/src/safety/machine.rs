@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use hs_data::msg::*;
 use hs_data::*;
@@ -31,7 +31,7 @@ pub trait SafetyStorage {
     /// Get three-chain `b'' -> b' -> b`. The first node is `b''`.
     fn find_three_chain(&self, node: &TreeNode) -> Vec<Arc<TreeNode>>;
 
-    /// Return True if `b.parent is b' and b'.parent is b'' `.
+    /// Return True if `b.parent is b' and b'.parent is b'' `. Return false if `chain.len() != 3`.
     fn is_consecutive_three_chain(&self, chain: &Vec<impl AsRef<TreeNode>>) -> bool;
 
     fn is_conflicting(&self, a: &TreeNode, b: &TreeNode) -> bool;
@@ -42,7 +42,7 @@ pub trait SafetyStorage {
 
     fn get_leaf(&self) -> Arc<TreeNode>;
 
-    // Check height before update leaf.
+    // Update leaf and stablize new leaf.
     fn update_leaf(&mut self, new_leaf: &TreeNode);
 
     fn get_locked_node(&self) -> Arc<TreeNode>;
@@ -50,15 +50,13 @@ pub trait SafetyStorage {
     /// Update locked node
     fn update_locked_node(&mut self, node: &TreeNode);
 
-    fn get_last_executed(&self) -> Arc<TreeNode>;
-
-    fn update_last_executed_node(&mut self, node: &TreeNode);
-
     fn get_view(&self) -> ViewNumber;
 
     fn increase_view(&mut self, new_view: ViewNumber);
 
     fn commit(&mut self, node: &TreeNode);
+
+    fn get_last_committed(&self) -> Arc<TreeNode>;
 
     // Get height of last voted node.
     fn get_vheight(&self) -> ViewNumber;
@@ -124,7 +122,7 @@ pub enum Ready {
     // Signature for the proposal
     Signature(Context, Arc<TreeNode>, Box<SignKit>),
     // TODO: remove
-    CommitState(Context, ViewNumber),
+    CommitState(Context, Arc<TreeNode>),
 
     BranchSyncDone(Arc<TreeNode>),
 }
@@ -227,7 +225,10 @@ impl<S: SafetyStorage> Safety for Machine<S> {
 
     fn on_commit(&mut self, to_commit: &TreeNode) -> Result<Ready> {
         self.storage.commit(to_commit);
-        Ok(Ready::Nil)
+        Ok(Ready::CommitState(
+            Context::response(self.self_id.clone(), self.storage.get_view()),
+            self.storage.get_last_committed(),
+        ))
     }
 
     fn safe_node(&mut self, node: &TreeNode, justify_node: &TreeNode) -> bool {
@@ -259,7 +260,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     fn on_beat(&mut self, cmds: Vec<Txn>) -> Result<Ready> {
         let prop = self.make_leaf(&cmds);
         self.storage.update_leaf(&prop);
-        // let justify = self.storage.get_qc_high();
+
         let ctx = Context::broadcast(self.self_id.clone(), self.storage().get_view());
 
         let sign_kit = self.voter.sign(&prop);
@@ -281,7 +282,6 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         info!("recv vote from {}, prop.view={}", &ctx.from, prop.height());
         // vote at most once.
         if self.voter.vote_set_size() > self.threshold() {
-            //self.compute_combined_sign();
             match self.voter.combine_partial_sign() {
                 // TODO: leaf as prop <=> no new proposal
                 Ok(combined_sign) => {
@@ -379,10 +379,11 @@ impl<S: SafetyStorage> Safety for Machine<S> {
             }
             SafetyEvent::NewTx(cmds) => self.on_beat(cmds),
             SafetyEvent::RecvNewViewMsg(_, qc_high) => {
-                // note: recv largest qc_high
+                // update qc-high
                 let qc_node = self.storage.get_node(qc_high.node_hash()).unwrap();
                 self.storage
                     .update_qc_high(qc_node.as_ref(), qc_high.as_ref());
+
                 Ok(self.form_update_qc_high())
             }
             // TODO: remove

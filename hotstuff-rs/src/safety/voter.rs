@@ -52,6 +52,7 @@ impl<S: Signaturer> Voter<S> {
         self.signature.sign(node)
     }
 
+    /// Consume the voting set and generate combined signature.
     pub fn combine_partial_sign(&mut self) -> Result<Box<CombinedSign>, VoteErr> {
         if self.vote_set_size() <= self.threshold {
             return Err(VoteErr::InsufficientSigns(
@@ -61,9 +62,12 @@ impl<S: Signaturer> Voter<S> {
         }
         self.decide();
 
-        self.signature
+        let res = self
+            .signature
             .combine_partial_sign(self.voting_set.values())
-            .map_err(|SignErr::InsufficientSigns(n, m)| VoteErr::InsufficientSigns(n, m))
+            .map_err(|SignErr::InsufficientSigns(n, m)| VoteErr::InsufficientSigns(n, m));
+        self.voting_set.clear();
+        res
     }
 
     pub fn validate_vote(&self, prop: &TreeNode, vote: &SignKit) -> bool {
@@ -91,7 +95,8 @@ impl<S: Signaturer> Voter<S> {
         self.voting_set.len()
     }
 
-    // stop recv votes until next view.
+    // Clear voting set and stop recv votes until next view.
+    // There won't be another voting set with at least n-f votes with view=current_view.
     fn decide(&mut self) {
         self.vote_decided = true;
     }

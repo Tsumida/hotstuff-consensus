@@ -12,7 +12,7 @@ use hotstuff_rs::safety::machine::{
 };
 use hs_data::{msg::Context, GenericQC, ReplicaID, SignKit, TreeNode, Txn, ViewNumber};
 use std::{
-    collections::{BinaryHeap, VecDeque},
+    collections::{BinaryHeap, HashMap, VecDeque},
     io,
     sync::{
         atomic::{AtomicU8, Ordering},
@@ -140,7 +140,7 @@ where
 
         // refactor
         let max_view_timeout = 60_000;
-        let rtt = 10_000;
+        let rtt = 30_000;
         let timer = DefaultTimer::new(notifier, max_view_timeout, rtt);
 
         Self {
@@ -333,7 +333,17 @@ where
             },
             PeerEvent::Ping { ctx, cont } => {}
             PeerEvent::NewView { ctx, qc_high } => {
-                self.emit_safety_event(SafetyEvent::RecvNewViewMsg(ctx, Arc::new(*qc_high)));
+                // collect at least n-f new-view
+                info!(
+                    "recv new-view msg from {} with justify.height = {}",
+                    &ctx.from,
+                    qc_high.view()
+                );
+                let qc = Arc::new(*qc_high);
+                self.liveness_storage()
+                    .new_view_set()
+                    .insert(ctx.from.clone(), qc.clone());
+                self.emit_safety_event(SafetyEvent::RecvNewViewMsg(ctx, qc));
             }
         }
         Ok(())
@@ -467,6 +477,11 @@ where
 
     fn update_pm_status(&mut self, view: ViewNumber) {
         self.view = ViewNumber::max(self.view, view);
+        info!(
+            "view = {} with leader = {:?}",
+            self.view,
+            self.elector.get_leader(self.view)
+        );
     }
 
     /// Go to new view and reset state. This function will increase view.
@@ -477,6 +492,8 @@ where
             self.timer.timeout_by_delay(),
             TimeoutEvent::ViewTimeout(self.view),
         );
+
+        self.liveness_storage().new_view_set().clear();
 
         let qc_high = self.liveness_storage().get_qc_high();
         let ctx = Context::single(
@@ -510,6 +527,18 @@ where
     pub fn safety_module(&mut self) -> &mut dyn Safety {
         &mut self.machine
     }
+
+    /// Return Some(Ready) if and only if there are at least n-f NewView.
+    pub fn make_new_proposal(&mut self, cmds: Vec<Txn>) -> Option<machine::Ready> {
+        let new_views = self.liveness_storage().new_view_set();
+        if new_views.len() <= self.liveness_storage().get_threshold() {
+            return None;
+        } else {
+            // there are no way to form another set with at least n-f new-view msgs.
+            self.liveness_storage().clean_new_view_set();
+            Some(self.safety_module().on_beat(cmds).unwrap())
+        }
+    }
 }
 
 use tokio::sync::oneshot;
@@ -526,9 +555,9 @@ pub struct PacemakerState {
 pub async fn event_loop_with_functions<S: SafetyStorage + LivenessStorage + Send + Sync>(
     mut pm: Pacemaker<S>,
     mut quit_ch: TchanR<()>,
-    mut observe_fn: impl Fn() -> Option<oneshot::Sender<PacemakerState>>,
-    mut inform_fn: impl Fn(Arc<TreeNode>),
-    mut fetch: impl Fn() -> Option<Vec<Txn>>,
+    observe_fn: impl Fn() -> Option<oneshot::Sender<PacemakerState>>,
+    inform_fn: impl Fn(Arc<TreeNode>),
+    fetch: impl Fn(bool) -> Option<Vec<Txn>>,
 ) -> std::io::Result<()> {
     info!("pacemaker up");
     let mut quit = false;
@@ -539,12 +568,30 @@ pub async fn event_loop_with_functions<S: SafetyStorage + LivenessStorage + Send
     interval.tick().await;
 
     while !quit {
-        if let Some(cmds) = fetch() {
-            let ready = pm.safety_module().on_beat(cmds);
+        // process new-tx
+
+        let enable_make_prop =
+            pm.liveness_storage().new_view_set().len() > pm.liveness_storage().get_threshold();
+
+        if let Some(cmds) = fetch(enable_make_prop) {
+            let ready = pm.make_new_proposal(cmds);
             match ready {
-                Ok(ready) => pm.ready_queue.push_back(ready),
-                Err(e) => error!("unexpected output {:?}", e),
+                Some(ready) => pm.ready_queue.push_back(ready),
+                None => {
+                    error!("Can't form new proposal: waiting for at least n-f new-view messaegs")
+                }
             }
+        }
+
+        // todo: process querying about hotstuff node.
+        if let Some(sender) = observe_fn() {
+            let pm_state = PacemakerState {
+                current_view: pm.view,
+                current_leader: Some(pm.elector.get_leader(pm.view).clone()),
+                replica_id: pm.id.clone(),
+                machine_snapshot: pm.safety_module().take_snapshot(),
+            };
+            let _ = sender.send(pm_state);
         }
 
         tokio::select! {
@@ -554,6 +601,9 @@ pub async fn event_loop_with_functions<S: SafetyStorage + LivenessStorage + Send
                 LivenessStorage::flush(pm.liveness_storage()).await.unwrap();
 
                 while let Some(ready) = pm.ready_queue.pop_front(){
+                    if let machine::Ready::CommitState(_, last_committed) = &ready {
+                        inform_fn(last_committed.clone());
+                    }
                     pm.process_ready_event(ready).await.unwrap();
                 }
             },
