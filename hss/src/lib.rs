@@ -386,7 +386,7 @@ pub async fn init_hotstuff_storage(
     signaturer: DefaultSignaturer,
 ) -> HotstuffStorage {
     let conn_pool = sqlx::pool::PoolOptions::new()
-        .max_connections(4)
+        .max_connections(2)
         .connect(mysql_addr)
         .await
         .unwrap();
@@ -433,7 +433,7 @@ pub struct HotstuffStorage {
     combined_tc_queue: VecDeque<TimeoutCertificate>,
     partial_tc_queue: VecDeque<TimeoutCertificate>,
 
-    new_view_set: HashMap<ReplicaID, Arc<GenericQC>>,
+    new_view_set: BTreeMap<ViewNumber, HashMap<ReplicaID, Arc<GenericQC>>>,
 
     /// consider case: `3<-4<-4`
     /// proposal `3<-4` should be appended into prop_queue and
@@ -493,7 +493,7 @@ impl HotstuffStorage {
             prop_queue: VecDeque::with_capacity(8),
             justify_queue: VecDeque::with_capacity(8),
             dirty: false,
-            new_view_set: HashMap::new(),
+            new_view_set: BTreeMap::new(),
         };
         // storage.append_new_node(init_node);
         storage
@@ -633,7 +633,7 @@ impl HotstuffStorage {
             prop_queue: VecDeque::with_capacity(8),
             justify_queue: VecDeque::with_capacity(8),
             dirty: false,
-            new_view_set: HashMap::new(),
+            new_view_set: BTreeMap::new(),
         }
     }
 
@@ -658,7 +658,7 @@ impl HotstuffStorage {
         while let Some(prop) = self.prop_queue.pop_front() {
             let view = prop.height();
             let parent_hash: String = base64::encode(prop.parent_hash());
-            let node_hash = base64::encode(prop.justify().node_hash());
+            let node_hash = base64::encode(TreeNode::hash(&prop));
             let sign = base64::encode(prop.justify().combined_sign().to_bytes());
             let txn = serde_json::to_vec(prop.tx()).unwrap();
 
@@ -671,7 +671,7 @@ impl HotstuffStorage {
                     (?, ?, ?)
                 ;",
             )
-            .bind(view)
+            .bind(prop.justify().view())
             .bind(&node_hash)
             .bind(&sign)
             .execute(&mut tx)
@@ -680,7 +680,7 @@ impl HotstuffStorage {
 
             sqlx::query(
                 "
-                    insert into proposal
+                    insert ignore into proposal
                     (view, parent_hash, justify_view, prop_hash, txn)
                     values
                     (?, ?, ?, ?, ?)
@@ -688,7 +688,7 @@ impl HotstuffStorage {
             )
             .bind(view)
             .bind(&parent_hash)
-            .bind(view)
+            .bind(prop.justify().view())
             .bind(&node_hash)
             .bind(&txn)
             .execute(&mut tx)
@@ -878,8 +878,6 @@ impl SafetyStorage for HotstuffStorage {
         let hash = TreeNode::hash(new_leaf);
         self.state.vheight = new_leaf.height();
         self.state.leaf = Arc::new(new_leaf.clone());
-        self.in_mem_queue
-            .insert(hash.clone(), self.state.leaf.clone());
         self.insert(hash, self.state.leaf.clone());
         self.set_dirty();
     }
@@ -897,9 +895,8 @@ impl SafetyStorage for HotstuffStorage {
         if let Some(qc_node) = self.get(self.get_qc_high().node_hash()) {
             if new_qc_node.height() > qc_node.height() {
                 self.state.qc_high = Arc::new(new_qc_high.clone());
-                // self.vheight = new_qc_node.height();
                 self.update_leaf(new_qc_node);
-
+                self.append_new_qc(new_qc_high);
                 debug!("update qc-high(h={})", new_qc_node.height());
                 self.set_dirty();
             }
@@ -1084,12 +1081,15 @@ impl LivenessStorage for HotstuffStorage {
                 grow_from,
                 batch_size,
             } => {
-                let v: Vec<TreeNode> = self
+                let mut v: Vec<TreeNode> = self
                     .in_mem_queue
                     .values()
                     .filter(|s| &s.height() > grow_from)
                     .map(|node| node.as_ref().clone())
                     .collect();
+
+                v.sort_by(|a, b| a.height().cmp(&b.height()));
+
                 Ok(BranchData { data: v })
             }
         }
@@ -1111,8 +1111,8 @@ impl LivenessStorage for HotstuffStorage {
         <Self as SafetyStorage>::increase_view(self, new_view);
     }
 
-    fn new_view_set(&mut self) -> &mut HashMap<ReplicaID, Arc<GenericQC>> {
-        &mut self.new_view_set
+    fn new_view_set(&mut self, view: ViewNumber) -> &mut HashMap<ReplicaID, Arc<GenericQC>> {
+        self.new_view_set.entry(view).or_insert(HashMap::new())
     }
 
     #[inline]
@@ -1120,7 +1120,9 @@ impl LivenessStorage for HotstuffStorage {
         self.threshold()
     }
 
-    fn clean_new_view_set(&mut self) {
-        self.new_view_set.clear()
+    fn clean_new_view_set(&mut self, view_threshold: ViewNumber) {
+        // BTreeMap::retain is unstable.
+        let new_tree = self.new_view_set.split_off(&view_threshold);
+        self.new_view_set = new_tree;
     }
 }

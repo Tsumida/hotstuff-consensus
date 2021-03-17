@@ -125,6 +125,9 @@ pub enum Ready {
     CommitState(Context, Arc<TreeNode>),
 
     BranchSyncDone(Arc<TreeNode>),
+
+    // explictly tell a proposal has formed qc
+    ProposalReachConsensus(ViewNumber),
 }
 
 /// Safety defines replica's reaction to message from other hotstuff peers.
@@ -266,6 +269,11 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         let sign_kit = self.voter.sign(&prop);
         self.voter.add_vote(&ctx, &sign_kit).unwrap();
 
+        info!(
+            "make new proposal with height = {}, justify={}",
+            prop.height(),
+            prop.justify().view()
+        );
         Ok(Ready::NewProposal(ctx, Arc::new(*prop)))
     }
 
@@ -294,7 +302,8 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                     );
                     self.storage.update_qc_high(&prop, &qc);
                     info!("qc formed");
-                    Ok(Ready::Nil)
+
+                    Ok(Ready::ProposalReachConsensus(qc.view()))
                 }
                 Err(e) => Err(SafetyErr::VoterError(e)),
             }
@@ -378,11 +387,14 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 self.on_recv_vote(&ctx, node.as_ref(), sign.as_ref())
             }
             SafetyEvent::NewTx(cmds) => self.on_beat(cmds),
-            SafetyEvent::RecvNewViewMsg(_, qc_high) => {
+            SafetyEvent::RecvNewViewMsg(ctx, qc_high) => {
                 // update qc-high
-                let qc_node = self.storage.get_node(qc_high.node_hash()).unwrap();
-                self.storage
-                    .update_qc_high(qc_node.as_ref(), qc_high.as_ref());
+                match self.storage.get_node(qc_high.node_hash()) {
+                    Some(qc_node) => {
+                        self.storage.update_qc_high(&qc_node, &qc_high);
+                    }
+                    _ => error!("can't find qc_high.node for new-view msg from {}", ctx.from),
+                }
 
                 Ok(self.form_update_qc_high())
             }
@@ -403,6 +415,13 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     }
 
     fn on_branch_sync(&mut self, branch: Vec<TreeNode>) -> Result<Ready> {
+        info!(
+            "recv branch sync data: {:?}",
+            branch
+                .iter()
+                .map(|prop| prop.height())
+                .collect::<Vec<ViewNumber>>()
+        );
         for prop in branch {
             if !self.verify_proposal(&prop.justify()).is_ok() {
                 break;

@@ -33,7 +33,7 @@ impl DefaultTimer {
     pub(crate) fn timeout_by_delay(&self) -> Duration {
         Duration::from_millis(u64::min(
             self.max_timeout,
-            self.rtt.wrapping_shl(1) + rand::random::<u64>() % 500,
+            self.rtt.wrapping_shl(1) + rand::random::<u64>() % 5000,
         ))
     }
 
@@ -62,6 +62,7 @@ impl DefaultTimer {
         let s = self.notifier.clone();
         let cnt = self.cnt.clone();
         tokio::spawn(async move {
+            debug!("new timing task with timeout = {} s", &dur.as_secs());
             cnt.fetch_add(1, Ordering::SeqCst);
             tokio::select! {
                 () = Delay::new(dur) => {

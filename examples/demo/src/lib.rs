@@ -3,7 +3,7 @@
 
 use cryptokit::DefaultSignaturer;
 use hotstuff_rs::safety::{machine::Machine, voter::Voter};
-use hs_data::{ReplicaID, TreeNode, Txn, INIT_NODE, INIT_NODE_HASH, PK};
+use hs_data::{ReplicaID, Txn, INIT_NODE, INIT_NODE_HASH, PK};
 use hs_network::HotStuffProxy;
 use hss::HotstuffStorage;
 use log::error;
@@ -11,10 +11,9 @@ use pacemaker::{elector::RoundRobinLeaderElector, pacemaker::Pacemaker};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 use threshold_crypto::SecretKeyShare;
-use warp::reply::Json;
 
 pub async fn init_hotstuff_node(
     token: String,
@@ -73,17 +72,20 @@ pub fn build_signaturer_from_string(
     DefaultSignaturer::new(sk_id, pkset, skshare)
 }
 
-#[derive(Clone)]
+pub struct TxWrapper {
+    pub tx_hash: String,
+    pub tx: Txn,
+    pub state: &'static str,
+}
+
 pub struct ServerSharedState {
-    pub commit_queue: VecDeque<TreeNode>,
     pub tx_queue: VecDeque<Txn>,
-    pub tx_pool: HashMap<String, Txn>,
+    pub tx_pool: HashMap<String, TxWrapper>,
 }
 
 impl Default for ServerSharedState {
     fn default() -> Self {
         ServerSharedState {
-            commit_queue: VecDeque::with_capacity(16),
             tx_queue: VecDeque::with_capacity(16),
             tx_pool: HashMap::with_capacity(16),
         }
@@ -121,20 +123,41 @@ pub async fn process_new_tx(
 
     match base64::decode(request.tx) {
         Ok(buf) => {
-            let txn = Txn(buf);
+            let txn = Txn(resp.tx_hash.as_bytes().to_vec());
             {
                 let mut sss_unlocked = sss.write().unwrap();
-                sss_unlocked
-                    .tx_pool
-                    .insert(resp.tx_hash.clone(), txn.clone());
+                sss_unlocked.tx_pool.insert(
+                    resp.tx_hash.clone(),
+                    TxWrapper {
+                        tx_hash: resp.tx_hash.clone(),
+                        tx: txn.clone(),
+                        state: TX_STATE_PENDING,
+                    },
+                );
                 sss_unlocked.tx_queue.push_back(txn);
             }
             resp.state = TX_STATE_PENDING;
-            Ok(warp::reply::json(&resp))
         }
         Err(e) => {
             error!("base64 decode failed");
-            Ok(warp::reply::json(&resp))
         }
     }
+
+    Ok(warp::reply::json(&resp))
+}
+
+pub async fn query_tx(
+    sss: Arc<RwLock<ServerSharedState>>,
+    tx_hash: String,
+) -> Result<impl warp::Reply, warp::Rejection> {
+    let mut resp = NewTxResponse {
+        tx_hash,
+        state: TX_STATE_INVALID,
+    };
+
+    if let Some(txw) = sss.read().unwrap().tx_pool.get(&resp.tx_hash) {
+        resp.state = txw.state;
+    }
+
+    Ok(warp::reply::json(&resp))
 }

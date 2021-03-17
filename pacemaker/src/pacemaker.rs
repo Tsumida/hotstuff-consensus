@@ -6,13 +6,12 @@ use crate::{
     timer::{DefaultTimer, TimeoutEvent},
 };
 use cryptokit::DefaultSignaturer;
-use futures::Future;
 use hotstuff_rs::safety::machine::{
     self, Machine, Ready, Safety, SafetyEvent, SafetyStorage, Snapshot,
 };
 use hs_data::{msg::Context, GenericQC, ReplicaID, SignKit, TreeNode, Txn, ViewNumber};
 use std::{
-    collections::{BinaryHeap, HashMap, VecDeque},
+    collections::{BTreeMap, BinaryHeap, HashMap, VecDeque},
     io,
     sync::{
         atomic::{AtomicU8, Ordering},
@@ -139,7 +138,7 @@ where
         let (notifier, timeout_ch) = tokio::sync::mpsc::channel(1);
 
         // refactor
-        let max_view_timeout = 60_000;
+        let max_view_timeout = 120_000;
         let rtt = 30_000;
         let timer = DefaultTimer::new(notifier, max_view_timeout, rtt);
 
@@ -163,7 +162,7 @@ where
         info!("pacemaker up");
         let mut quit = false;
 
-        self.goto_new_view(self.view + 1).await?;
+        self.goto_new_view(1).await?;
 
         let mut interval = tokio::time::interval(Duration::from_millis(2000));
         interval.tick().await;
@@ -301,7 +300,7 @@ where
                 match self.liveness_storage().fetch_branch(&strategy) {
                     Ok(bd) => {
                         self.emit_peer_event(PeerEvent::BranchSyncResponse {
-                            ctx,
+                            ctx: Context::single(self.id.clone(), ctx.from, self.view),
                             strategy,
                             branch: Some(bd),
                             status: SyncStatus::Success,
@@ -311,7 +310,7 @@ where
                     Err(e) => {
                         error!("{:?}", e);
                         self.emit_peer_event(PeerEvent::BranchSyncResponse {
-                            ctx,
+                            ctx: Context::single(self.id.clone(), ctx.from, self.view),
                             strategy,
                             branch: None,
                             status: SyncStatus::ProposalNonExists,
@@ -329,9 +328,9 @@ where
                 SyncStatus::Success if branch.is_some() => {
                     self.emit_safety_event(SafetyEvent::BranchSync(ctx, branch.unwrap().data))
                 }
-                other => error!("{:?}", other),
+                other => error!("branch sync error: {:?}", other),
             },
-            PeerEvent::Ping { ctx, cont } => {}
+            PeerEvent::Ping { .. } => {}
             PeerEvent::NewView { ctx, qc_high } => {
                 // collect at least n-f new-view
                 info!(
@@ -341,7 +340,7 @@ where
                 );
                 let qc = Arc::new(*qc_high);
                 self.liveness_storage()
-                    .new_view_set()
+                    .new_view_set(ctx.view)
                     .insert(ctx.from.clone(), qc.clone());
                 self.emit_safety_event(SafetyEvent::RecvNewViewMsg(ctx, qc));
             }
@@ -377,8 +376,7 @@ where
                 .await?;
 
                 // responsiveness, goto next view right now.
-                self.timer
-                    .view_timeout(self.view, self.timer.timeout_by_delay());
+                self.process_local_timeout(self.view + 1).await?;
             }
             machine::Ready::CommitState(_, _) => {}
             machine::Ready::BranchSyncDone(leaf) => {
@@ -396,6 +394,10 @@ where
                     info!("branch sync done, leaf={}", leaf.height());
                     self.check_pending_prop(leaf.height()).await?;
                 }
+            }
+            Ready::ProposalReachConsensus(new_view) => {
+                // responsiveness, goto next view right now.
+                self.process_local_timeout(new_view + 1).await?;
             }
         }
         Ok(())
@@ -421,8 +423,8 @@ where
                     )
                     .is_ok()
                 {
-                    let grow_from = self.liveness_storage().get_locked_node().height();
-
+                    // let grow_from = self.liveness_storage().get_locked_node().height();
+                    let grow_from = leaf_height;
                     info!(
                         "start branch sync: from={}, batch-size={}]",
                         grow_from, BATCH_SIZE
@@ -477,6 +479,8 @@ where
 
     fn update_pm_status(&mut self, view: ViewNumber) {
         self.view = ViewNumber::max(self.view, view);
+        let new_view = self.view;
+        LivenessStorage::increase_view(self.liveness_storage(), new_view);
         info!(
             "view = {} with leader = {:?}",
             self.view,
@@ -493,7 +497,8 @@ where
             TimeoutEvent::ViewTimeout(self.view),
         );
 
-        self.liveness_storage().new_view_set().clear();
+        let new_view = self.view;
+        self.liveness_storage().clean_new_view_set(new_view);
 
         let qc_high = self.liveness_storage().get_qc_high();
         let ctx = Context::single(
@@ -530,12 +535,21 @@ where
 
     /// Return Some(Ready) if and only if there are at least n-f NewView.
     pub fn make_new_proposal(&mut self, cmds: Vec<Txn>) -> Option<machine::Ready> {
-        let new_views = self.liveness_storage().new_view_set();
-        if new_views.len() <= self.liveness_storage().get_threshold() {
+        let th = self.liveness_storage().get_threshold();
+        let current_view = self.view;
+        let lens = self.liveness_storage().new_view_set(current_view).len();
+
+        if lens <= th {
+            error!(
+                "new-view msg not enough, need at least {}, got {}",
+                th + 1,
+                lens
+            );
             return None;
         } else {
             // there are no way to form another set with at least n-f new-view msgs.
-            self.liveness_storage().clean_new_view_set();
+            let current_view = self.view;
+            self.liveness_storage().clean_new_view_set(current_view);
             Some(self.safety_module().on_beat(cmds).unwrap())
         }
     }
@@ -562,16 +576,16 @@ pub async fn event_loop_with_functions<S: SafetyStorage + LivenessStorage + Send
     info!("pacemaker up");
     let mut quit = false;
 
-    pm.goto_new_view(pm.view + 1).await?;
+    pm.goto_new_view(1).await?;
 
     let mut interval = tokio::time::interval(Duration::from_millis(2000));
     interval.tick().await;
 
     while !quit {
         // process new-tx
-
-        let enable_make_prop =
-            pm.liveness_storage().new_view_set().len() > pm.liveness_storage().get_threshold();
+        let current_view = pm.view;
+        let enable_make_prop = pm.liveness_storage().new_view_set(current_view).len()
+            > pm.liveness_storage().get_threshold();
 
         if let Some(cmds) = fetch(enable_make_prop) {
             let ready = pm.make_new_proposal(cmds);

@@ -23,6 +23,7 @@ serde_json = ""
 threshold_crypto = { version = "0.4", git = "https://github.com/poanetwork/threshold_crypto" }
 clap = ""
 warp = "0.3"
+rand = "=0.7.3"
 
 [[bin]]
 name = "generate_sk"

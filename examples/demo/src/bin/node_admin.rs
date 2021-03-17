@@ -1,28 +1,24 @@
 //! Load config and start a hotstuff node.
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     io::Read,
     net::SocketAddr,
     process::exit,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 
 use clap::{App, Arg};
 use demo::{
-    build_signaturer_from_string, init_hotstuff_node, process_new_tx, NewTxRequest, NewTxResponse,
-    ServerSharedState, TX_STATE_INVALID, TX_STATE_PENDING,
+    build_signaturer_from_string, init_hotstuff_node, process_new_tx, query_tx, ServerSharedState,
+    TX_STATE_COMMITTED,
 };
-use hs_data::{TreeNode, Txn};
-use hs_network::RpcResp;
-use log::{error, info, LevelFilter};
+use hs_data::TreeNode;
+use log::{info, LevelFilter};
 use pacemaker::pacemaker::event_loop_with_functions;
-use simplelog::{CombinedLogger, ConfigBuilder, TermLogger, TerminalMode, WriteLogger};
+use simplelog::{CombinedLogger, ConfigBuilder, WriteLogger};
 use warp::Filter;
 
 fn main() {
-    // Example:
-    //  ./node_admin -t=test -i=Alice -s=./test-output/crypto-0 -b=./test-output/peer_addrs -d=mysql://root:helloworld@localhost:3306/hotstuff_test_Alice
-    //
     // generate pkset, sks,
     let matches = App::new("hotstuff-admin")
         .version("0.1.0")
@@ -176,17 +172,34 @@ fn main() {
     let shared_state_fn = warp::any().map(move || s1.clone());
 
     // server for submit new tx.
-    let server = warp::post()
+    let new_tx_server = warp::post()
         .and(warp::path("new-tx"))
         .and(warp::path::end())
         .and(shared_state_fn.clone())
         .and(warp::body::content_length_limit(2 << 20).and(warp::body::json()))
         .and_then(process_new_tx);
 
+    // /tx/:string
+    let tx_query = warp::get()
+        .and(warp::path("tx"))
+        .and(shared_state_fn.clone())
+        .and(warp::path::param())
+        .and(warp::path::end())
+        .and_then(query_tx);
+
     // Informing new committed proposals
     let inform_fn = |prop: Arc<TreeNode>| {
         let mut sss_unlocked = shared_state.write().unwrap();
-        sss_unlocked.commit_queue.push_back(prop.as_ref().clone());
+        // update txn.
+        for proposal in prop.tx() {
+            // interpret
+            sss_unlocked
+                .tx_pool
+                .entry(String::from_utf8(proposal.0.clone()).unwrap())
+                .and_modify(|txw| {
+                    txw.state = TX_STATE_COMMITTED;
+                });
+        }
     };
 
     let observe_fn = || None;
@@ -215,7 +228,7 @@ fn main() {
             let pm = init_hotstuff_node(token, num, replica_id, db, peer_addrs, signaturer).await;
             let (_, quit_ch) = tokio::sync::mpsc::channel(1);
 
-            tokio::spawn(warp::serve(server).run(tx_server_addr));
+            tokio::spawn(warp::serve(new_tx_server.or(tx_query)).run(tx_server_addr));
 
             // pm.run(quit_ch).await.unwrap();
             event_loop_with_functions(pm, quit_ch, observe_fn, inform_fn, fetch)
