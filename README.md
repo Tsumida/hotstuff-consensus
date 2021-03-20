@@ -1,4 +1,6 @@
 # hotstuff-consensus
+## Note
+hotstuff-consensus is under development. Since it's buggy, more tests and refactoring and needed. 
 ## Arch
 ![arch](https://github.com/Tsumida/hotstuff-consensus/blob/dev/design/arch.png)
 
