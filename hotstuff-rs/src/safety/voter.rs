@@ -1,7 +1,7 @@
 use cryptokit::{SignErr, Signaturer};
 use hs_data::{msg::Context, CombinedSign, ReplicaID, SignKit, TreeNode, ViewNumber};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 
 use log::error;
@@ -24,14 +24,10 @@ pub enum VoteErr {
 pub struct Voter<S: Signaturer> {
     // crypto related
     view: ViewNumber,
-
     // signaturer related
     signature: S,
-
     threshold: usize,
-
-    voting_set: HashMap<ReplicaID, SignKit>,
-
+    voting_set: BTreeMap<ViewNumber, HashMap<ReplicaID, SignKit>>,
     // TODO: use vheight
     vote_decided: bool,
 }
@@ -43,7 +39,7 @@ impl<S: Signaturer> Voter<S> {
             // TODO:
             signature,
             threshold,
-            voting_set: HashMap::new(),
+            voting_set: BTreeMap::new(),
             vote_decided: false,
         }
     }
@@ -53,20 +49,20 @@ impl<S: Signaturer> Voter<S> {
     }
 
     /// Consume the voting set and generate combined signature.
-    pub fn combine_partial_sign(&mut self) -> Result<Box<CombinedSign>, VoteErr> {
-        if self.vote_set_size() <= self.threshold {
+    pub fn combine_partial_sign(&mut self, view: ViewNumber) -> Result<Box<CombinedSign>, VoteErr> {
+        if self.vote_set_size(view) <= self.threshold {
             return Err(VoteErr::InsufficientSigns(
                 self.threshold + 1,
-                self.vote_set_size(),
+                self.vote_set_size(view),
             ));
         }
         self.decide();
 
         let res = self
             .signature
-            .combine_partial_sign(self.voting_set.values())
+            .combine_partial_sign(self.voting_set.get_mut(&view).unwrap().values())
             .map_err(|SignErr::InsufficientSigns(n, m)| VoteErr::InsufficientSigns(n, m));
-        self.voting_set.clear();
+        let _ = self.voting_set.remove(&view);
         res
     }
 
@@ -84,15 +80,25 @@ impl<S: Signaturer> Voter<S> {
         self.vote_decided = false;
     }
 
-    pub fn add_vote(&mut self, ctx: &Context, sign: &SignKit) -> Result<(), VoteErr> {
-        match self.voting_set.insert(ctx.from.clone(), sign.clone()) {
+    pub fn add_vote(
+        &mut self,
+        ctx: &Context,
+        view: ViewNumber,
+        sign: &SignKit,
+    ) -> Result<(), VoteErr> {
+        match self
+            .voting_set
+            .entry(view)
+            .or_insert(HashMap::new())
+            .insert(ctx.from.clone(), sign.clone())
+        {
             None => Ok(()),
             Some(_) => Err(VoteErr::DuplicateVote(ctx.from.clone())),
         }
     }
 
-    pub fn vote_set_size(&self) -> usize {
-        self.voting_set.len()
+    pub fn vote_set_size(&self, view: ViewNumber) -> usize {
+        self.voting_set.get(&view).map_or(0, |x| x.len())
     }
 
     // Clear voting set and stop recv votes until next view.

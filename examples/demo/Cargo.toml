@@ -20,6 +20,7 @@ log = ""
 simplelog = ""
 serde = ""
 serde_json = ""
+serde_yaml = ""
 threshold_crypto = { version = "0.4", git = "https://github.com/poanetwork/threshold_crypto" }
 clap = ""
 warp = "0.3"

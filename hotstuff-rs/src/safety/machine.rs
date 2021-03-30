@@ -126,7 +126,7 @@ pub enum Ready {
 
     BranchSyncDone(Arc<TreeNode>),
 
-    // explictly tell a proposal has formed qc
+    // This msg carries view for lasted proposal formed qc.
     ProposalReachConsensus(ViewNumber),
 }
 
@@ -267,7 +267,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         let ctx = Context::broadcast(self.self_id.clone(), self.storage().get_view());
 
         let sign_kit = self.voter.sign(&prop);
-        self.voter.add_vote(&ctx, &sign_kit).unwrap();
+        let _ = self.voter.add_vote(&ctx, prop.height(), &sign_kit);
 
         info!(
             "make new proposal with height = {}, justify={}",
@@ -282,18 +282,18 @@ impl<S: SafetyStorage> Safety for Machine<S> {
         if !self.voter.validate_vote(prop, sign) {
             return Err(SafetyErr::CorruptedVote);
         }
-        if let Err(e) = self.voter.add_vote(ctx, sign) {
+        if let Err(e) = self.voter.add_vote(ctx, prop.height(), sign) {
             error!("{:?}", e);
             return Ok(Ready::Nil);
         }
 
         info!("recv vote from {}, prop.view={}", &ctx.from, prop.height());
         // vote at most once.
-        if self.voter.vote_set_size() > self.threshold() {
-            match self.voter.combine_partial_sign() {
+        if self.voter.vote_set_size(prop.height()) > self.threshold() {
+            match self.voter.combine_partial_sign(prop.height()) {
                 // TODO: leaf as prop <=> no new proposal
                 Ok(combined_sign) => {
-                    let prop_hash = TreeNode::hash(prop);
+                    let prop_hash = TreeNode::hash(self.storage().get_leaf().as_ref());
                     let qc = GenericQC::new(
                         // TODO: should be node.height()?
                         self.storage.get_view(),
@@ -467,14 +467,18 @@ impl<S: SafetyStorage> Machine<S> {
             // any correct qc has combined signature except for init_qc.
             if !GenericQC::is_init_qc(&justify) {
                 let valid = self.voter.validate_qc(&qc_node, justify.combined_sign());
-                debug!("recv prop validate: {}", valid);
+                debug!(
+                    "recv prop validate: {} with justify.view = {}",
+                    valid,
+                    justify.view()
+                );
                 if !valid {
                     return Err(SafetyErr::CorruptedQC);
                 }
             }
             Ok(Ready::Nil)
         } else {
-            debug!("prop.justify.node not found");
+            debug!("prop.justify.node(h={}) not found", justify.view());
             Err(SafetyErr::CorruptedQC)
         }
     }

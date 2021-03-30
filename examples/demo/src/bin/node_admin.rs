@@ -3,16 +3,15 @@ use std::{
     collections::HashMap,
     io::Read,
     net::SocketAddr,
-    process::exit,
     sync::{Arc, RwLock},
 };
 
 use clap::{App, Arg};
 use demo::{
-    build_signaturer_from_string, init_hotstuff_node, process_new_tx, query_tx, ServerSharedState,
-    TX_STATE_COMMITTED,
+    build_signaturer_from_string, config::NodeConfig, init_hotstuff_node, process_new_tx, query_tx,
+    ServerSharedState, TX_STATE_COMMITTED,
 };
-use hs_data::TreeNode;
+use hs_data::{ReplicaID, TreeNode, Txn, ViewNumber};
 use log::{info, LevelFilter};
 use pacemaker::pacemaker::event_loop_with_functions;
 use simplelog::{CombinedLogger, ConfigBuilder, WriteLogger};
@@ -23,117 +22,58 @@ fn main() {
     let matches = App::new("hotstuff-admin")
         .version("0.1.0")
         .author("tsuko")
-        .about("start hotstuff node")
+        .about("Hotstuff node administration")
         .arg(
-            Arg::with_name("secret")
-                .short("s")
-                .long("secret")
+            Arg::with_name("config-file")
+                .short("c")
+                .long("config")
                 .takes_value(true)
-                .help("Load secret file"),
-        )
-        .arg(
-            Arg::with_name("token")
-                .short("t")
-                .long("token")
-                .takes_value(true)
-                .help("hotstuff token"),
-        )
-        .arg(
-            Arg::with_name("replica-id")
-                .short("i")
-                .long("id")
-                .takes_value(true)
-                .help("ID of hotstuff node."),
-        )
-        .arg(
-            Arg::with_name("bootstrap")
-            .short("b")
-            .long("bootstrap")
-            .takes_value(true)
-            .help("Peers addr for bootstrapping."),
-        )
-        .arg(
-            Arg::with_name("db-backend")
-                .short("d")
-                .long("db-backend")
-                .takes_value(true)
-                .help("Specify database backend, for example an mysql db connnection. If this is empty, an in-memory stroage will be used and no durability is guaranteed."),
-        )
-        .arg(
-            Arg::with_name("tx-server-addr")
-                // .short("d")
-                .long("--tx-server-addr")
-                .takes_value(true)
-                .help("Address for listening client requests."),
+                .help("Load config file"),
         )
         .get_matches();
 
-    let replica_id = matches.value_of("replica-id").unwrap().to_string();
+    // load config
+    let config_path = matches.value_of("config-file").expect("Need config file");
+    let mut conf_str = String::new();
+    let _ = std::fs::File::open(config_path)
+        .unwrap()
+        .read_to_string(&mut conf_str)
+        .unwrap();
+    let config: NodeConfig = serde_yaml::from_str(&conf_str).expect("can't parse config file");
 
     // recover signaturer
-    let mut secret = HashMap::with_capacity(16);
-    if let Some(secret_path) = matches.value_of("secret") {
-        let secret_path = std::path::Path::new(secret_path);
-        if secret_path.is_file() {
-            let mut f = std::fs::File::open(secret_path).expect("can't read secret file");
-            let mut buf = String::with_capacity(1024);
-            f.read_to_string(&mut buf).expect("can't load secret");
-            splite_kv_pair(buf, &mut secret);
-        } else {
-            exit(-1);
-        }
+    let replica_id = config.node_name;
+    let sk_id: usize = config.secret.sk_id as usize;
+    let sk_share = config.secret.sk_share;
+    let pk_set = config.secret.pk_set;
+    let num: usize = config.bootstrap_conf.total;
+    let token = config.bootstrap_conf.token;
+    let (block_size, block_num) = match config.test_config {
+        demo::config::TestConfig::SingleNode {
+            proposal_num,
+            proposal_size,
+        } => (proposal_size, proposal_num),
+        _ => panic!("unsupported"),
     };
 
-    //  format:
-    //      <replica_id>=<addr>
-    //
+    let db = match config.persistor {
+        demo::config::PersistentBackend::MySQL { db } => db,
+        _ => panic!("unsupported type"),
+    };
 
-    let sk_id: usize = secret
-        .get("sk_id")
-        .expect("can't find key: sk_id")
+    let peer_addrs: HashMap<ReplicaID, String> = config
+        .bootstrap_conf
+        .peer_addrs
+        .into_iter()
+        .map(|pi| (pi.node_id, pi.addr))
+        .collect();
+
+    let tx_server_addr: SocketAddr = config
+        .server_addr
         .parse()
-        .expect("failed to parse");
-
-    let sk_share = secret.get("sk_share").expect("can't find key: sk_share");
-    let pk_set = secret.get("pk_set").expect("can't find key: pk_set");
-    let num: usize = secret
-        .get("num")
-        .expect("can't find key: sk_share")
-        .parse()
-        .expect("failed to parse");
-
-    let token = matches.value_of("token").expect("need token").to_string();
-
-    let db = matches
-        .value_of("db-backend")
-        .expect("can't find key: db-backend");
-
-    let mut peer_addrs = HashMap::with_capacity(num);
-
-    let path = matches
-        .value_of("bootstrap")
-        .expect("need bootstrap config");
-
-    let tx_server_addr: SocketAddr = matches
-        .value_of("tx-server-addr")
-        .expect("need --tx-server-addr")
-        .parse()
-        .expect("invalied arg: --tx-server-addr");
-
-    let mut buf = String::with_capacity(1024);
-    std::fs::File::open(path)
-        .expect("can't open bootstrap config")
-        .read_to_string(&mut buf)
-        .expect("load failed");
-
-    splite_kv_pair(buf, &mut peer_addrs);
+        .expect("can't parse tx-server addr");
 
     // --------------------------------------------- check ---------------------------------------------
-    if !peer_addrs.contains_key(&replica_id) {
-        println!("replica{} not in peer addrs config", &replica_id);
-        exit(-1);
-    }
-
     if peer_addrs.len() != num {
         println!(
             "imcompatible number of peers {} while total = {}",
@@ -162,9 +102,17 @@ fn main() {
                 .build(),
             std::fs::File::create(format!("./hotstuff-{}-{}.log", token, replica_id)).unwrap(),
         ),
+        WriteLogger::new(
+            LevelFilter::Debug,
+            ConfigBuilder::new()
+                .add_filter_allow(format!("hotstuff_rs"))
+                .build(),
+            std::fs::File::create(format!("./hotstuff-{}-{}-machine.log", token, replica_id))
+                .unwrap(),
+        ),
     ]);
 
-    let signaturer = build_signaturer_from_string(sk_id, sk_share, pk_set);
+    let signaturer = build_signaturer_from_string(sk_id, &sk_share, &pk_set);
 
     let shared_state = Arc::new(RwLock::new(ServerSharedState::default()));
 
@@ -187,7 +135,7 @@ fn main() {
         .and(warp::path::end())
         .and_then(query_tx);
 
-    // Informing new committed proposals
+    // define
     let inform_fn = |prop: Arc<TreeNode>| {
         let mut sss_unlocked = shared_state.write().unwrap();
         // update txn.
@@ -200,24 +148,32 @@ fn main() {
                     txw.state = TX_STATE_COMMITTED;
                 });
         }
+
+        let last_committed = prop.height();
+        sss_unlocked.committed_list.push(last_committed);
     };
 
+    // update imformation
     let observe_fn = || None;
 
     let fetch = |enable_make_prop: bool| {
-        let mut ss = shared_state.write().unwrap();
-        if !enable_make_prop || ss.tx_queue.len() == 0 {
+        if !enable_make_prop {
             return None;
         }
-        let mut txs = Vec::with_capacity(8);
-        for _ in 0..8 {
-            match ss.tx_queue.pop_front() {
-                Some(prop) => txs.push(prop),
-                None => break,
-            }
-        }
-        Some(txs)
+        Some(vec![Txn(vec![0u8; block_size])])
     };
+
+    let finilizer = || {
+        let sss_unlocked = shared_state.write().unwrap();
+        // println!("committed proposal: {:?}", sss_unlocked.committed_list);
+        info!("call finilizer: \n");
+        for ck in sss_unlocked.committed_list.chunks(8) {
+            println!("committed proposal: {:?}", ck);
+        }
+    };
+
+    // tell node to stop.
+    let end_fn = |cur_view: ViewNumber| cur_view > (block_num * num) as u64;
 
     info!("init hotstuff node: {}-{}", token, replica_id);
 
@@ -225,26 +181,14 @@ fn main() {
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(async move {
-            let pm = init_hotstuff_node(token, num, replica_id, db, peer_addrs, signaturer).await;
+            let pm = init_hotstuff_node(token, num, replica_id, &db, peer_addrs, signaturer).await;
             let (_, quit_ch) = tokio::sync::mpsc::channel(1);
 
             tokio::spawn(warp::serve(new_tx_server.or(tx_query)).run(tx_server_addr));
 
             // pm.run(quit_ch).await.unwrap();
-            event_loop_with_functions(pm, quit_ch, observe_fn, inform_fn, fetch)
+            event_loop_with_functions(pm, quit_ch, observe_fn, inform_fn, fetch, end_fn, finilizer)
                 .await
                 .unwrap();
-        });
-}
-
-fn splite_kv_pair(buf: String, secret: &mut HashMap<String, String>) {
-    buf.lines()
-        .map(|line| line.trim().splitn(2, "=").collect::<Vec<&str>>())
-        .filter(|kv| kv.len() == 2)
-        .for_each(|kv| {
-            secret.insert(
-                kv.get(0).unwrap().to_string(),
-                kv.get(1).unwrap().to_string(),
-            );
         });
 }

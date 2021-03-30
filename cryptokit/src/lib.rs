@@ -5,7 +5,7 @@
 //!
 //!
 
-use hs_data::{CombinedSign, Sign, SignID, SignKit, TreeNode, PK, SK};
+use hs_data::{CombinedSign, SignID, SignKit, TreeNode, PK, SK};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

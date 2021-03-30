@@ -138,8 +138,8 @@ where
         let (notifier, timeout_ch) = tokio::sync::mpsc::channel(1);
 
         // refactor
-        let max_view_timeout = 120_000;
-        let rtt = 30_000;
+        let max_view_timeout = 30_000;
+        let rtt = 5_000;
         let timer = DefaultTimer::new(notifier, max_view_timeout, rtt);
 
         Self {
@@ -208,8 +208,9 @@ where
         }
     }
 
-    async fn process_local_timeout(&mut self, view: ViewNumber) -> io::Result<()> {
-        if view >= self.view {
+    /// Immediately goto new view.
+    async fn process_local_timeout(&mut self, new_view: ViewNumber) -> io::Result<()> {
+        if new_view >= self.view {
             // emit timeout event and save tc.
             let qc_high = self.liveness_storage().get_qc_high().as_ref().clone();
             let tc = self.sign_tc(self.view, qc_high);
@@ -229,7 +230,7 @@ where
             // goto new view and reset timer.
             // if view == self.view -> goto self.view + 1
             // if view  > self.view -> goto view
-            self.goto_new_view(ViewNumber::max(view, self.view + 1))
+            self.goto_new_view(ViewNumber::max(new_view, self.view + 1))
                 .await?;
 
             // persist current-view
@@ -325,8 +326,10 @@ where
                 branch,
                 ..
             } => match status {
-                SyncStatus::Success if branch.is_some() => {
-                    self.emit_safety_event(SafetyEvent::BranchSync(ctx, branch.unwrap().data))
+                SyncStatus::Success => {
+                    if let Some(branch) = branch {
+                        self.emit_safety_event(SafetyEvent::BranchSync(ctx, branch.data));
+                    }
                 }
                 other => error!("branch sync error: {:?}", other),
             },
@@ -334,9 +337,10 @@ where
             PeerEvent::NewView { ctx, qc_high } => {
                 // collect at least n-f new-view
                 info!(
-                    "recv new-view msg from {} with justify.height = {}",
+                    "recv new-view msg from {} with justify.height = {}, view = {}",
                     &ctx.from,
-                    qc_high.view()
+                    qc_high.view(),
+                    ctx.view,
                 );
                 let qc = Arc::new(*qc_high);
                 self.liveness_storage()
@@ -368,6 +372,7 @@ where
                 }
             }
             machine::Ready::Signature(ctx, prop, sign) => {
+                let flag = ctx.from != self.id;
                 self.emit_peer_event(PeerEvent::AcceptProposal {
                     ctx,
                     prop: Box::new(prop.as_ref().clone()),
@@ -376,7 +381,11 @@ where
                 .await?;
 
                 // responsiveness, goto next view right now.
-                self.process_local_timeout(self.view + 1).await?;
+                if flag {
+                    self.process_local_timeout(prop.height() + 1).await?;
+                    // replicas wait for brief time so that leader goes to next view quicker.
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
             }
             machine::Ready::CommitState(_, _) => {}
             machine::Ready::BranchSyncDone(leaf) => {
@@ -395,9 +404,9 @@ where
                     self.check_pending_prop(leaf.height()).await?;
                 }
             }
-            Ready::ProposalReachConsensus(new_view) => {
+            Ready::ProposalReachConsensus(prop_view) => {
                 // responsiveness, goto next view right now.
-                self.process_local_timeout(new_view + 1).await?;
+                self.process_local_timeout(prop_view + 1).await?;
             }
         }
         Ok(())
@@ -548,7 +557,7 @@ where
             return None;
         } else {
             // there are no way to form another set with at least n-f new-view msgs.
-            let current_view = self.view;
+            let current_view = self.view + 1;
             self.liveness_storage().clean_new_view_set(current_view);
             Some(self.safety_module().on_beat(cmds).unwrap())
         }
@@ -566,13 +575,18 @@ pub struct PacemakerState {
 }
 
 /// Event loop for pacemaker with observer, informer and queue for new coming tx.
-pub async fn event_loop_with_functions<S: SafetyStorage + LivenessStorage + Send + Sync>(
+pub async fn event_loop_with_functions<S>(
     mut pm: Pacemaker<S>,
     mut quit_ch: TchanR<()>,
     observe_fn: impl Fn() -> Option<oneshot::Sender<PacemakerState>>,
     inform_fn: impl Fn(Arc<TreeNode>),
     fetch: impl Fn(bool) -> Option<Vec<Txn>>,
-) -> std::io::Result<()> {
+    end_fn: impl Fn(ViewNumber) -> bool,
+    finilizer: impl Fn(),
+) -> std::io::Result<()>
+where
+    S: SafetyStorage + LivenessStorage + Send + Sync,
+{
     info!("pacemaker up");
     let mut quit = false;
 
@@ -584,6 +598,10 @@ pub async fn event_loop_with_functions<S: SafetyStorage + LivenessStorage + Send
     while !quit {
         // process new-tx
         let current_view = pm.view;
+        if end_fn(current_view) {
+            quit = true;
+            break;
+        }
         let enable_make_prop = pm.liveness_storage().new_view_set(current_view).len()
             > pm.liveness_storage().get_threshold();
 
@@ -636,7 +654,8 @@ pub async fn event_loop_with_functions<S: SafetyStorage + LivenessStorage + Send
     // refactor
     info!("flushing...");
     LivenessStorage::flush(pm.liveness_storage()).await.unwrap();
-
     info!("pacemaker down");
+
+    finilizer();
     Ok(())
 }

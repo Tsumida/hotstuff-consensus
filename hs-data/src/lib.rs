@@ -80,3 +80,29 @@ pub fn form_chain<'a>(
     }
     v
 }
+
+#[test]
+#[ignore = "tested"]
+fn test_threshold_sign() {
+    // Test:
+    //     combine(0, 1, 2) == combine(1, 2, 3)
+    //
+    let n = 4;
+    let (sks, pks, vec_sks) = crate::sign_kit::threshold_sign_kit(n, (n << 1) / 3);
+
+    let sign_0_3 = vec_sks
+        .iter()
+        .take(3)
+        .map(|(i, sk)| (*i, sk.sign(1u64.to_be_bytes())))
+        .collect::<Vec<(usize, Sign)>>();
+    let sign_1_4 = vec_sks[1..]
+        .iter()
+        .take(3)
+        .map(|(i, sk)| (*i, sk.sign(1u64.to_be_bytes())))
+        .collect::<Vec<(usize, Sign)>>();
+
+    assert_eq!(
+        pks.combine_signatures(sign_0_3.iter().map(|(a, b)| (*a, b))),
+        pks.combine_signatures(sign_1_4.iter().map(|(a, b)| (*a, b)))
+    );
+}

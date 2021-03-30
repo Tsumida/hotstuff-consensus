@@ -1,9 +1,11 @@
 //! Demo
 //!
 
+pub mod config;
+
 use cryptokit::DefaultSignaturer;
 use hotstuff_rs::safety::{machine::Machine, voter::Voter};
-use hs_data::{ReplicaID, Txn, INIT_NODE, INIT_NODE_HASH, PK};
+use hs_data::{ReplicaID, Txn, ViewNumber, INIT_NODE, INIT_NODE_HASH, PK};
 use hs_network::HotStuffProxy;
 use hss::HotstuffStorage;
 use log::error;
@@ -81,6 +83,7 @@ pub struct TxWrapper {
 pub struct ServerSharedState {
     pub tx_queue: VecDeque<Txn>,
     pub tx_pool: HashMap<String, TxWrapper>,
+    pub committed_list: Vec<ViewNumber>,
 }
 
 impl Default for ServerSharedState {
@@ -88,6 +91,7 @@ impl Default for ServerSharedState {
         ServerSharedState {
             tx_queue: VecDeque::with_capacity(16),
             tx_pool: HashMap::with_capacity(16),
+            committed_list: Vec::new(),
         }
     }
 }
