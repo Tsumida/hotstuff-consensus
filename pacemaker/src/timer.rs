@@ -61,26 +61,26 @@ impl DefaultTimer {
         let mut end_ch = self.stop_ch.subscribe();
         let s = self.notifier.clone();
         let cnt = self.cnt.clone();
+        let task_id: usize = rand::random::<usize>() % (1 << 20);
         tokio::spawn(async move {
-            debug!("new timing task with timeout = {} s", &dur.as_secs());
+            debug!("new timer {} with timeout = {} s", task_id, &dur.as_secs());
             cnt.fetch_add(1, Ordering::SeqCst);
             tokio::select! {
                 () = Delay::new(dur) => {
                     s.send(te).await.unwrap();
                 },
-                _ = end_ch.recv() => {},
+                _ = end_ch.recv() => {
+                    debug!("cancel timer {}", task_id);
+                },
             };
-            let left = cnt.fetch_sub(1, Ordering::SeqCst);
-            debug!("view timeout task done. {} task left", left - 1);
+            cnt.fetch_sub(1, Ordering::SeqCst);
         });
     }
 
     pub(crate) fn stop_view_timer(&self) {
         // refactor: make sure all prev timer is dropped.
-        // `self.stop_ch.send(())` return once at least one handle so it doesn't assume all has drop.
-        if let Err(e) = self.stop_ch.send(()) {
-            error!("{}", e.to_string());
-        }
+        // return err only if there are no receivers.
+        let _ = self.stop_ch.send(());
     }
 
     /// Timeout right now.

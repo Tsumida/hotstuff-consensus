@@ -208,15 +208,11 @@ where
         }
     }
 
-    /// Immediately goto new view.
-    async fn process_local_timeout(&mut self, new_view: ViewNumber) -> io::Result<()> {
-        if new_view >= self.view {
-            // emit timeout event and save tc.
+    /// Try to go to view=`new_view`+1.
+    async fn process_local_timeout(&mut self, timeout_view: ViewNumber) -> io::Result<()> {
+        if timeout_view >= self.view {
             let qc_high = self.liveness_storage().get_qc_high().as_ref().clone();
             let tc = self.sign_tc(self.view, qc_high);
-
-            // right now, we will send timeout through rpc.
-            // need in the future.
 
             self.emit_peer_event(PeerEvent::Timeout {
                 ctx: Context::broadcast(self.id.clone(), self.view),
@@ -228,15 +224,10 @@ where
             // self.liveness_storage().append_tc(tc).unwrap();
 
             // goto new view and reset timer.
-            // if view == self.view -> goto self.view + 1
-            // if view  > self.view -> goto view
-            self.goto_new_view(ViewNumber::max(new_view, self.view + 1))
-                .await?;
+            self.goto_new_view(timeout_view + 1).await?;
 
-            // persist current-view
             let current_view = self.view;
             LivenessStorage::increase_view(self.liveness_storage(), current_view);
-            info!("timeout and goto view {}", self.view);
 
             // Reuse local timeout event for branch synchronizing timeout.
             if self
@@ -288,8 +279,7 @@ where
                         if v > self.view {
                             // view=self.view timeouts right now.
                             // self.view will increase once the pacemaker recv local timeout event.
-                            self.timer
-                                .view_timeout(self.view, self.timer.timeout_by_delay());
+                            self.process_local_timeout(v).await?;
                         }
                     }
                     Err(e) => {
@@ -372,7 +362,11 @@ where
                 }
             }
             machine::Ready::Signature(ctx, prop, sign) => {
-                let flag = ctx.from != self.id;
+                let flag = match ctx.to {
+                    hs_data::msg::DeliveryType::Single(ref to) => to != &self.id,
+                    _ => unreachable!(),
+                };
+
                 self.emit_peer_event(PeerEvent::AcceptProposal {
                     ctx,
                     prop: Box::new(prop.as_ref().clone()),
@@ -382,9 +376,9 @@ where
 
                 // responsiveness, goto next view right now.
                 if flag {
-                    self.process_local_timeout(prop.height() + 1).await?;
                     // replicas wait for brief time so that leader goes to next view quicker.
                     tokio::time::sleep(Duration::from_millis(200)).await;
+                    self.process_local_timeout(prop.height()).await?;
                 }
             }
             machine::Ready::CommitState(_, _) => {}
@@ -406,7 +400,7 @@ where
             }
             Ready::ProposalReachConsensus(prop_view) => {
                 // responsiveness, goto next view right now.
-                self.process_local_timeout(prop_view + 1).await?;
+                self.process_local_timeout(prop_view).await?;
             }
         }
         Ok(())
@@ -498,13 +492,11 @@ where
     }
 
     /// Go to new view and reset state. This function will increase view.
-    async fn goto_new_view(&mut self, view: ViewNumber) -> io::Result<()> {
-        self.timer.stop_view_timer();
-        self.update_pm_status(view);
-        self.timer.start(
-            self.timer.timeout_by_delay(),
-            TimeoutEvent::ViewTimeout(self.view),
-        );
+    async fn goto_new_view(&mut self, new_view: ViewNumber) -> io::Result<()> {
+        self.timer
+            .view_timeout(new_view, self.timer.timeout_by_delay());
+
+        self.update_pm_status(new_view);
 
         let new_view = self.view;
         self.liveness_storage().clean_new_view_set(new_view);
@@ -574,7 +566,7 @@ pub struct PacemakerState {
     pub machine_snapshot: Snapshot,
 }
 
-/// Event loop for pacemaker with observer, informer and queue for new coming tx.
+/// Event loop for pacemaker with observer, informer and other hooks.
 pub async fn event_loop_with_functions<S>(
     mut pm: Pacemaker<S>,
     mut quit_ch: TchanR<()>,
@@ -582,7 +574,7 @@ pub async fn event_loop_with_functions<S>(
     inform_fn: impl Fn(Arc<TreeNode>),
     fetch: impl Fn(bool) -> Option<Vec<Txn>>,
     end_fn: impl Fn(ViewNumber) -> bool,
-    finilizer: impl Fn(),
+    finilizer: impl FnOnce(),
 ) -> std::io::Result<()>
 where
     S: SafetyStorage + LivenessStorage + Send + Sync,

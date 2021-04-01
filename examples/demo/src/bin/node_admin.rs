@@ -3,12 +3,15 @@ use std::{
     collections::HashMap,
     io::Read,
     net::SocketAddr,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
+    time::SystemTime,
 };
 
 use clap::{App, Arg};
 use demo::{
-    build_signaturer_from_string, config::NodeConfig, init_hotstuff_node, process_new_tx, query_tx,
+    config::{NodeConfig, TestConfig},
+    process_new_tx, query_tx,
+    utils::{build_signaturer_from_string, init_hotstuff_node, HotStuffNodeStat},
     ServerSharedState, TX_STATE_COMMITTED,
 };
 use hs_data::{ReplicaID, TreeNode, Txn, ViewNumber};
@@ -56,6 +59,12 @@ fn main() {
         _ => panic!("unsupported"),
     };
 
+    let is_test = if let TestConfig::SingleNode { .. } = config.test_config {
+        true
+    } else {
+        false
+    };
+
     let db = match config.persistor {
         demo::config::PersistentBackend::MySQL { db } => db,
         _ => panic!("unsupported type"),
@@ -83,17 +92,7 @@ fn main() {
     }
 
     // --------------------------------------------- init ----------------------------------------------
-
     let _ = CombinedLogger::init(vec![
-        /*
-        TermLogger::new(
-            LevelFilter::Debug,
-            ConfigBuilder::new()
-                .add_filter_ignore(format!("sqlx"))
-                .add_filter_ignore(format!("rustls"))
-                .build(),
-            TerminalMode::Mixed,
-        ),*/
         WriteLogger::new(
             LevelFilter::Debug,
             ConfigBuilder::new()
@@ -113,21 +112,23 @@ fn main() {
     ]);
 
     let signaturer = build_signaturer_from_string(sk_id, &sk_share, &pk_set);
-
     let shared_state = Arc::new(RwLock::new(ServerSharedState::default()));
-
     let s1 = shared_state.clone();
+    let stat = Arc::new(Mutex::new(HotStuffNodeStat::default()));
+    // --------------------------------------------- tx-server ----------------------------------------------
     let shared_state_fn = warp::any().map(move || s1.clone());
 
-    // server for submit new tx.
-    let new_tx_server = warp::post()
+    // URL: /new-tx
+    // Fn : Summit new transaction.
+    let tx_summit = warp::post()
         .and(warp::path("new-tx"))
         .and(warp::path::end())
         .and(shared_state_fn.clone())
         .and(warp::body::content_length_limit(2 << 20).and(warp::body::json()))
         .and_then(process_new_tx);
 
-    // /tx/:string
+    // URL: /tx/<tx-id>
+    // Fn : Query TX status.
     let tx_query = warp::get()
         .and(warp::path("tx"))
         .and(shared_state_fn.clone())
@@ -135,22 +136,26 @@ fn main() {
         .and(warp::path::end())
         .and_then(query_tx);
 
-    // define
+    let tx_server = tx_summit.or(tx_query);
+
+    // --------------------------------------------- hooks ----------------------------------------------
+    // inform_fn should not keep prop in case of memery leak.
     let inform_fn = |prop: Arc<TreeNode>| {
-        let mut sss_unlocked = shared_state.write().unwrap();
-        // update txn.
-        for proposal in prop.tx() {
-            // interpret
-            sss_unlocked
-                .tx_pool
-                .entry(String::from_utf8(proposal.0.clone()).unwrap())
-                .and_modify(|txw| {
-                    txw.state = TX_STATE_COMMITTED;
-                });
+        {
+            let mut sss_unlocked = shared_state.write().unwrap();
+            // update txn.
+            for proposal in prop.tx() {
+                // interpret
+                sss_unlocked
+                    .tx_pool
+                    .entry(String::from_utf8(proposal.0.clone()).unwrap())
+                    .and_modify(|txw| {
+                        txw.state = TX_STATE_COMMITTED;
+                    });
+            }
         }
 
-        let last_committed = prop.height();
-        sss_unlocked.committed_list.push(last_committed);
+        stat.lock().unwrap().take_new_committed_prop(&prop);
     };
 
     // update imformation
@@ -164,29 +169,40 @@ fn main() {
     };
 
     let finilizer = || {
-        let sss_unlocked = shared_state.write().unwrap();
-        // println!("committed proposal: {:?}", sss_unlocked.committed_list);
-        info!("call finilizer: \n");
-        for ck in sss_unlocked.committed_list.chunks(8) {
-            println!("committed proposal: {:?}", ck);
+        if is_test {
+            info!("finilizing");
+            let unlocked_stat = stat.lock().unwrap();
+            info!("committed:  {:?}", unlocked_stat.committed_prop_list);
+            info!(
+                "interval(ms):  {:?}",
+                unlocked_stat
+                    .interval_list
+                    .iter()
+                    .map(|i| i.as_millis())
+                    .collect::<Vec<u128>>()
+            );
+            info!("max-gap: {}", unlocked_stat.max_gap);
+            info!("total: {} ms", unlocked_stat.total_time().as_millis());
         }
     };
 
-    // tell node to stop.
     let end_fn = |cur_view: ViewNumber| cur_view > (block_num * num) as u64;
 
-    info!("init hotstuff node: {}-{}", token, replica_id);
-
     // --------------------------------------------- run -----------------------------------------------
+    info!("init hotstuff node: {}-{}", token, &replica_id);
+
+    {
+        stat.lock().unwrap().ts_start = SystemTime::now();
+    }
+
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(async move {
             let pm = init_hotstuff_node(token, num, replica_id, &db, peer_addrs, signaturer).await;
             let (_, quit_ch) = tokio::sync::mpsc::channel(1);
 
-            tokio::spawn(warp::serve(new_tx_server.or(tx_query)).run(tx_server_addr));
+            tokio::spawn(warp::serve(tx_server).run(tx_server_addr));
 
-            // pm.run(quit_ch).await.unwrap();
             event_loop_with_functions(pm, quit_ch, observe_fn, inform_fn, fetch, end_fn, finilizer)
                 .await
                 .unwrap();

@@ -121,7 +121,10 @@ pub enum Ready {
     UpdateQCHigh(Context, Arc<TreeNode>),
     // Signature for the proposal
     Signature(Context, Arc<TreeNode>, Box<SignKit>),
-    // TODO: remove
+
+    // refactor:
+    //      Machine didn't output this msg in currect implementation.
+    //      So outside observer can't track commitments.
     CommitState(Context, Arc<TreeNode>),
 
     BranchSyncDone(Arc<TreeNode>),
