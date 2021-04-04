@@ -1,9 +1,6 @@
 //! Datastructure for liveness
 
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-};
+use std::hash::Hash;
 
 use cryptokit::{DefaultSignaturer, Signaturer};
 use hs_data::msg::Context;
@@ -93,7 +90,7 @@ impl TimeoutCertificate {
 /// where `|ps1| > t, |ps2| > t` and `t` is the threshold, since different node set may receive different time certificate set.
 pub fn combine_time_certificates<'a>(
     signaturer: &DefaultSignaturer,
-    from: &ReplicaID,
+    _: &ReplicaID,
     view: ViewNumber,
     qc_high: GenericQC,
     tcs: impl IntoIterator<Item = &'a TimeoutCertificate>,

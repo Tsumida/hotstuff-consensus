@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use hs_data::msg::*;
 use hs_data::*;
@@ -200,8 +200,6 @@ pub struct Machine<S: SafetyStorage> {
     total: usize,
     self_id: ReplicaID,
     leader_id: Option<ReplicaID>,
-    //input: Receiver<SafetyEvent>,
-    //output: Sender<SafetyEvent>,
 }
 
 impl<S: SafetyStorage> Safety for Machine<S> {

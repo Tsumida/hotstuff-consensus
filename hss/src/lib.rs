@@ -2,7 +2,13 @@
 
 // pub mod sqlite;
 
-use cryptokit::{DefaultSignaturer, Signaturer};
+pub mod persistor;
+pub mod recover;
+
+use persistor::{FlushTask, MySQLStorage};
+use recover::*;
+
+use cryptokit::DefaultSignaturer;
 use hotstuff_rs::safety::machine::{SafetyStorage, Snapshot};
 use hs_data::*;
 use log::{debug, error, info};
@@ -10,13 +16,12 @@ use pacemaker::{
     data::{combine_time_certificates, BranchData, BranchSyncStrategy, TimeoutCertificate},
     liveness_storage::{LivenessStorage, LivenessStorageErr},
 };
-use sqlx::{mysql::MySqlRow, Executor, MySqlPool, Row};
+use sqlx::mysql::MySqlRow;
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     sync::Arc,
     time::SystemTime,
 };
-use threshold_crypto::serde_impl::SerdeSecret;
 
 use thiserror::Error;
 #[derive(Debug, Clone, Error)]
@@ -25,300 +30,7 @@ pub enum HotStuffStroageErr {
     FailedToFlush,
 }
 
-fn map_row_to_proposal(row: MySqlRow) -> (NodeHash, Arc<TreeNode>) {
-    let view: ViewNumber = row.get(0);
-    let parent_hash: String = row.get(1);
-    // let justify_view: ViewNumber = row.get(2);
-    // let prop_hash: String = row.get(3);
-    let tx: Vec<u8> = row.get(4);
-    let node_hash: NodeHash =
-        NodeHash::from_vec(&base64::decode(&row.get::<String, _>(6)).unwrap());
-    let combined_sign: String = row.get(7);
-    let node = Arc::new(TreeNode {
-        height: view,
-        txs: serde_json::from_slice(&tx).unwrap(),
-        parent: NodeHash::from_vec(&base64::decode(&parent_hash).unwrap()),
-        justify: GenericQC::new(
-            view,
-            &node_hash,
-            &combined_sign_from_vec_u8(base64::decode(&combined_sign).unwrap()),
-        ),
-    });
-
-    (node_hash, node)
-}
-
-async fn get_one_node_by_view(
-    conn_pool: &MySqlPool,
-    view: ViewNumber,
-) -> Result<(NodeHash, Arc<TreeNode>), sqlx::Error> {
-    //  0       1               2           3            4        5           6               7
-    // view | parent_hash | justify_view | prop_hash |  tx  | qc.view | qc.node_hash | qc.combined_sign
-    sqlx::query(
-        "select * from proposal inner join qc 
-        on proposal.justify_view=qc.view 
-        where proposal.view = ? limit 1",
-    )
-    .bind(view)
-    .map(|row: MySqlRow| map_row_to_proposal(row))
-    .fetch_one(conn_pool)
-    .await
-}
-
-async fn recover_tc_map(
-    conn_pool: &MySqlPool,
-) -> BTreeMap<ViewNumber, HashSet<TimeoutCertificate>> {
-    let mut tc_map = BTreeMap::new();
-    sqlx::query("select view, partial_sign from partial_tc;")
-        .fetch_all(conn_pool)
-        .await
-        .unwrap()
-        .into_iter()
-        .for_each(|row: MySqlRow| {
-            let view: ViewNumber = row.get(0);
-            let tc: TimeoutCertificate =
-                serde_json::from_str(&row.get::<String, usize>(1)).unwrap();
-            let tcs = tc_map.entry(view).or_insert(HashSet::new());
-            tcs.insert(tc);
-        });
-
-    tc_map
-}
-
-async fn recover_hotstuff_config(conn_pool: &MySqlPool) -> HotStuffConfig {
-    let (token, total, replica_id, addr) =
-        sqlx::query("select token, total, self_addr, self_id from hotstuff_conf limit 1; ")
-            .map(|row: MySqlRow| {
-                let token: String = row.get(0);
-                let total: usize = row.get::<u64, _>(1) as usize;
-                let addr: String = row.get(2);
-                let replica_id: String = row.get(3);
-
-                (token, total, replica_id, addr)
-            })
-            .fetch_one(conn_pool)
-            .await
-            .unwrap();
-
-    let peers_addr: HashMap<ReplicaID, String> = sqlx::query("select replica_id, addr from peers;")
-        .map(|row: MySqlRow| {
-            let replica_id: String = row.get(0);
-            let addr: String = row.get(1);
-            (replica_id, addr)
-        })
-        .fetch_all(conn_pool)
-        .await
-        .unwrap()
-        .into_iter()
-        .collect();
-
-    HotStuffConfig {
-        token,
-        total,
-        replica_id,
-        peers_addr,
-    }
-}
-
-async fn recover_hotstuff_state(conn_pool: &MySqlPool) -> InMemoryState {
-    // load hotstuff_state
-    let (token, current_view, vheight, locked_view, committed_height, executed_view, leaf_view) =
-        sqlx::query("select * from hotstuff_state;")
-            .map(|row: MySqlRow| {
-                //     0          1                 2               3               4                 5            6
-                //  | token | current_view  | last_voted_view | locked_view  |  committed_view | executed_view | leaf_view
-                let token: String = row.get(0);
-                let current_view: ViewNumber = row.get(1);
-                let vheight: ViewNumber = row.get(2);
-                let locked_view: ViewNumber = row.get(3);
-                let committed_view: ViewNumber = row.get(4);
-                let executed_view: ViewNumber = row.get(5);
-                let leaf_view: ViewNumber = row.get(6);
-                (
-                    token,
-                    current_view,
-                    vheight,
-                    locked_view,
-                    committed_view,
-                    executed_view,
-                    leaf_view,
-                )
-            })
-            .fetch_one(conn_pool)
-            .await
-            .unwrap();
-
-    // refactor: stablized INIT_NODE
-    let leaf = if leaf_view > 0 {
-        get_one_node_by_view(conn_pool, leaf_view).await.unwrap().1
-    } else {
-        Arc::new(INIT_NODE.clone())
-    };
-
-    let b_locked = if locked_view > 0 {
-        get_one_node_by_view(conn_pool, locked_view)
-            .await
-            .unwrap()
-            .1
-    } else {
-        Arc::new(INIT_NODE.clone())
-    };
-
-    let last_commit = if executed_view > 0 {
-        get_one_node_by_view(conn_pool, executed_view)
-            .await
-            .unwrap()
-            .1
-    } else {
-        Arc::new(INIT_NODE.clone())
-    };
-
-    let qc_high = Arc::new(leaf.justify().clone());
-
-    let state = InMemoryState {
-        token,
-        leaf,
-        qc_high,
-        vheight,
-        current_view,
-        committed_height,
-        last_commit,
-        b_locked,
-    };
-
-    state
-}
-
-async fn recover_signaturer(token: &String, conn_pool: &MySqlPool) -> DefaultSignaturer {
-    sqlx::query("select pk_set, sk_share, sk_id from crypto where token = ? limit 1; ")
-        .bind(token)
-        .map(|row: MySqlRow| {
-            let pk_set: Vec<u8> = row.get(0);
-            let sk_share: Vec<u8> = row.get(1);
-            let sk_id: u64 = row.get(2);
-
-            DefaultSignaturer {
-                sign_id: sk_id as usize,
-                pks: serde_json::from_slice(&pk_set).unwrap(),
-                sks: serde_json::from_slice::<SerdeSecret<SK>>(&sk_share)
-                    .unwrap()
-                    .0,
-            }
-        })
-        .fetch_one(conn_pool)
-        .await
-        .unwrap()
-}
-
-async fn create_tables(conn_pool: &MySqlPool) {
-    conn_pool
-        .execute(
-            "
-            CREATE TABLE IF NOT EXISTS `combined_tc`
-            (
-            `view`           bigint unsigned NOT NULL ,
-            `combined_sign`  varchar(512) NOT NULL ,
-
-            PRIMARY KEY (`view`)
-            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-
-            CREATE TABLE IF NOT EXISTS `crypto`
-            (
-            `token`    varchar(64) NOT NULL ,
-            `pk_set`   blob NOT NULL ,
-            `sk_share` blob NOT NULL ,
-            `sk_id`    bigint unsigned NOT NULL ,
-
-            PRIMARY KEY (`token`)
-            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-
-            CREATE TABLE IF NOT EXISTS `hotstuff_conf`
-            (
-            `token`     varchar(64) NOT NULL ,
-            `total`     bigint unsigned NOT NULL ,
-            `self_addr` varchar(64) NOT NULL ,
-            `self_id`   varchar(64) NOT NULL ,
-
-            PRIMARY KEY (`token`)
-            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-
-            CREATE TABLE IF NOT EXISTS `hotstuff_state`
-            (
-            `token`           varchar(64) NOT NULL ,
-            `current_view`    bigint unsigned NOT NULL ,
-            `last_voted_view` bigint unsigned NOT NULL ,
-            `locked_view`     bigint unsigned NOT NULL ,
-            `committed_view`  bigint unsigned NOT NULL ,
-            `executed_view`   bigint unsigned NOT NULL ,
-            `leaf_view`       bigint unsigned NOT NULL ,
-
-            PRIMARY KEY (`token`)
-            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-
-            CREATE TABLE IF NOT EXISTS `partial_tc`
-            (
-            `view`         bigint unsigned NOT NULL ,
-            `partial_sign` varchar(512) NOT NULL ,
-            `replica_id`   varchar(64) NOT NULL ,
-
-            PRIMARY KEY (`view`, `replica_id`)
-            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-            CREATE TABLE IF NOT EXISTS `peers`
-            (
-            `replica_id` varchar(64) NOT NULL ,
-            `addr`       varchar(64) NOT NULL ,
-
-            PRIMARY KEY (`replica_id`)
-            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-
-            CREATE TABLE IF NOT EXISTS `proposal`
-            (
-            `view`         bigint unsigned NOT NULL ,
-            `parent_hash`  varchar(128) NOT NULL ,
-            `justify_view` bigint unsigned NOT NULL ,
-            `prop_hash`    varchar(128) NOT NULL ,
-            `txn`          mediumblob NOT NULL ,
-
-            PRIMARY KEY (`view`)
-            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
-            CREATE TABLE IF NOT EXISTS `qc`
-            (
-            `view`          bigint unsigned NOT NULL ,
-            `node_hash`     varchar(256) NOT NULL ,
-            `combined_sign` varchar(512) NOT NULL ,
-
-            PRIMARY KEY (`view`)
-            )ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-        ",
-        )
-        .await
-        .unwrap();
-}
-
-async fn drop_tables(conn_pool: &MySqlPool) {
-    conn_pool
-        .execute(
-            "
-            DROP TABLE IF EXISTS `combined_tc`;
-            DROP TABLE IF EXISTS `proposal`;
-            DROP TABLE IF EXISTS `qc`;
-            DROP TABLE IF EXISTS `partial_tc`;
-            DROP TABLE IF EXISTS `hotstuff_state`;
-            DROP TABLE IF EXISTS `peers`;
-            DROP TABLE IF EXISTS `hotstuff_conf`;
-            DROP TABLE IF EXISTS `crypto`;
-            ",
-        )
-        .await
-        .unwrap();
-}
+#[derive(Clone)]
 pub struct InMemoryState {
     // Token of the hotstuff system.
     token: String,
@@ -343,11 +55,6 @@ pub struct InMemoryState {
     // Last locked proposal.
     b_locked: Arc<TreeNode>,
 }
-pub struct MySQLStorage {
-    pub conn_pool: sqlx::MySqlPool,
-}
-
-impl MySQLStorage {}
 
 /// Create a HotStuffStorage using in memory storage(Mysql disabled).
 pub fn init_in_mem_storage(
@@ -391,7 +98,7 @@ pub async fn init_hotstuff_storage(
         .await
         .unwrap();
 
-    let backend = Some(MySQLStorage { conn_pool });
+    let backend = Some(MySQLStorage::new(conn_pool));
 
     let conf = HotStuffConfig {
         token: token.clone(),
@@ -426,18 +133,15 @@ pub struct HotstuffStorage {
     state: InMemoryState,
     conf: HotStuffConfig,
     signaturer: DefaultSignaturer,
-    tc_map: BTreeMap<ViewNumber, HashSet<TimeoutCertificate>>,
 
     in_mem_queue: HashMap<NodeHash, Arc<TreeNode>>,
 
-    combined_tc_queue: VecDeque<TimeoutCertificate>,
-    partial_tc_queue: VecDeque<TimeoutCertificate>,
-
+    tc_map: BTreeMap<ViewNumber, HashSet<TimeoutCertificate>>,
     new_view_set: BTreeMap<ViewNumber, HashMap<ReplicaID, Arc<GenericQC>>>,
 
-    /// consider case: `3<-4<-4`
-    /// proposal `3<-4` should be appended into prop_queue and
-    /// the second 4's qc should be appended into justify_queue.
+    // dirty data.
+    combined_tc_queue: VecDeque<TimeoutCertificate>,
+    partial_tc_queue: VecDeque<TimeoutCertificate>,
     prop_queue: VecDeque<Arc<TreeNode>>,
     justify_queue: VecDeque<GenericQC>,
 
@@ -500,54 +204,9 @@ impl HotstuffStorage {
     }
 
     pub async fn init(&mut self) {
-        if self.backend.as_ref().is_none() {
-            return;
+        if let Some(backend) = self.backend.as_mut() {
+            backend.init(&self.conf, &self.signaturer).await;
         }
-
-        let backend = self.backend.as_ref().unwrap();
-        drop_tables(&backend.conn_pool).await;
-        create_tables(&backend.conn_pool).await;
-        let mut tx = backend.conn_pool.begin().await.unwrap();
-
-        // init peers
-        for (id, peers) in &self.conf.peers_addr {
-            sqlx::query("insert into peers (replica_id, addr) values (?, ?); ")
-                .bind(id)
-                .bind(peers)
-                .execute(&mut tx)
-                .await
-                .unwrap();
-        }
-
-        // init conf
-        sqlx::query(
-            "insert into hotstuff_conf (token, total, self_addr, self_id) values (?, ?, ?, ?);",
-        )
-        .bind(&self.conf.token)
-        .bind(self.conf.total as u64)
-        .bind(self.conf.peers_addr.get(&self.conf.replica_id).unwrap())
-        .bind(&self.conf.replica_id)
-        .execute(&mut tx)
-        .await
-        .unwrap();
-
-        // refactor
-        let pk_set = serde_json::to_vec(&self.signaturer.pks).unwrap();
-        let sk_share: SerdeSecret<SK> = SerdeSecret(self.signaturer.sks.clone()); // panic if type == String
-        let encoded_sks = serde_json::to_vec(&sk_share).unwrap();
-        debug!("pk set size = {} Byte", pk_set.len());
-
-        // init crypto
-        sqlx::query("insert into crypto (token, pk_set, sk_share, sk_id) values (?, ?, ?, ?);")
-            .bind(&self.conf.token)
-            .bind(&pk_set)
-            .bind(&encoded_sks)
-            .bind(self.signaturer.sign_id() as u64)
-            .execute(&mut tx)
-            .await
-            .unwrap();
-
-        tx.commit().await.unwrap();
     }
 
     pub async fn recover(token: String, addr: &str) -> HotstuffStorage {
@@ -622,7 +281,7 @@ impl HotstuffStorage {
         );
 
         HotstuffStorage {
-            backend: Some(MySQLStorage { conn_pool }),
+            backend: Some(MySQLStorage::new(conn_pool)),
             state,
             conf,
             signaturer,
@@ -639,144 +298,39 @@ impl HotstuffStorage {
 
     // refactor
     pub async fn async_flush(&mut self) -> Result<(), sqlx::Error> {
-        if self.backend.is_none() || !self.dirty {
+        if !self.dirty {
             return Ok(());
         }
 
-        // start rx
+        if let Some(backend) = self.backend.as_mut() {
+            let mut prop_queue = VecDeque::with_capacity(self.prop_queue.len());
+            prop_queue.append(&mut self.prop_queue);
 
-        let mut tx = self.backend.as_ref().unwrap().conn_pool.begin().await?;
-        // flush proposal queue;
-        debug!(
-            "queue size - prop={}, qc={}, ptc={}, ctc={}",
-            self.prop_queue.len(),
-            self.justify_queue.len(),
-            self.partial_tc_queue.len(),
-            self.combined_tc_queue.len()
-        );
-        // flush prop and justify
-        while let Some(prop) = self.prop_queue.pop_front() {
-            let view = prop.height();
-            let parent_hash: String = base64::encode(prop.parent_hash());
-            let node_hash = base64::encode(TreeNode::hash(&prop));
-            let sign = base64::encode(prop.justify().combined_sign().to_bytes());
-            let txn = serde_json::to_vec(prop.tx()).unwrap();
+            let mut justify_queue = VecDeque::with_capacity(self.justify_queue.len());
+            justify_queue.append(&mut self.justify_queue);
 
-            // Note that previous flush may insert a qc with the same view.
-            sqlx::query(
-                "
-                    insert ignore into qc
-                    (view, node_hash, combined_sign)
-                    values
-                    (?, ?, ?)
-                ;",
-            )
-            .bind(prop.justify().view())
-            .bind(&node_hash)
-            .bind(&sign)
-            .execute(&mut tx)
-            .await
-            .unwrap();
+            let mut partial_tc_queue = VecDeque::with_capacity(self.partial_tc_queue.len());
+            partial_tc_queue.append(&mut self.partial_tc_queue);
 
-            sqlx::query(
-                "
-                    insert ignore into proposal
-                    (view, parent_hash, justify_view, prop_hash, txn)
-                    values
-                    (?, ?, ?, ?, ?)
-                ;",
-            )
-            .bind(view)
-            .bind(&parent_hash)
-            .bind(prop.justify().view())
-            .bind(&node_hash)
-            .bind(&txn)
-            .execute(&mut tx)
-            .await
-            .unwrap();
+            let mut combined_tc_queue = VecDeque::with_capacity(self.combined_tc_queue.len());
+            combined_tc_queue.append(&mut self.combined_tc_queue);
+
+            let state = self.state.clone();
+
+            let task = FlushTask::asynch(
+                combined_tc_queue,
+                partial_tc_queue,
+                prop_queue,
+                justify_queue,
+                state,
+            );
+
+            backend.async_flush(task).await;
+
+            self.reset_dirty();
         }
 
-        // flush justify queue;
-        while let Some(qc) = self.justify_queue.pop_front() {
-            let view = qc.view();
-            let node_hash = base64::encode(qc.node_hash());
-            let sign = base64::encode(qc.combined_sign().to_bytes());
-
-            // The previous proposal flushing may insert a qc with the same view.
-            sqlx::query(
-                "
-                    insert ignore into qc 
-                    (view, node_hash, combined_sign)
-                    values
-                    (?, ?, ?)
-                ;",
-            )
-            .bind(view)
-            .bind(&node_hash)
-            .bind(&sign)
-            .execute(&mut tx)
-            .await
-            .unwrap();
-        }
-
-        // todo: flush ptc
-        while let Some(ptc) = self.partial_tc_queue.pop_front() {
-            sqlx::query(
-                "
-                insert ignore into partial_tc
-                (view, replica_id, partial_sign)
-                values
-                (?, ?, ?)
-                ",
-            )
-            .bind(ptc.view())
-            .bind(ptc.from())
-            .bind(serde_json::to_string(ptc.view_sign()).unwrap())
-            .execute(&mut tx)
-            .await
-            .unwrap();
-        }
-
-        // todo: flush ctc
-        while let Some(ctc) = self.combined_tc_queue.pop_front() {
-            sqlx::query(
-                "
-                insert ignore into combined_tc
-                (view, combined_sign)
-                values
-                (?, ?);
-                ",
-            )
-            .bind(ctc.view())
-            .bind(serde_json::to_string(ctc.view_sign()).unwrap())
-            .execute(&mut tx)
-            .await
-            .unwrap();
-        }
-
-        // flush state
-        sqlx::query(
-            "
-                replace into hotstuff_state 
-                (token, current_view, last_voted_view, locked_view, committed_view, executed_view, leaf_view) 
-                values 
-                (?, ?, ?, ?, ?, ?, ?);",
-        )
-        .bind(&self.state.token)
-        .bind(self.state.current_view)
-        .bind(self.state.vheight)
-        .bind(self.state.b_locked.height())
-        .bind(self.state.committed_height)
-        .bind(self.state.last_commit.height())
-        .bind(self.state.leaf.height())
-        .execute(&mut tx)
-        .await
-        .unwrap();
-
-        let res = tx.commit().await;
-        info!("flush ");
-        self.reset_dirty();
-        res
+        Ok(())
     }
 
     #[inline]
@@ -789,7 +343,7 @@ impl HotstuffStorage {
         let view = self
             .tc_map
             .iter()
-            .filter(|(k, s)| s.len() >= self.conf.threshold())
+            .filter(|(_, s)| s.len() >= self.conf.threshold())
             .max_by_key(|(k, _)| *k)
             .map(|(view, _)| *view);
 
@@ -1074,13 +628,10 @@ impl LivenessStorage for HotstuffStorage {
         &self,
         strategy: &BranchSyncStrategy,
     ) -> Result<BranchData, LivenessStorageErr> {
-        // refactor
+        // refactor: batch_size
         // Find proposals in memory through
         match strategy {
-            BranchSyncStrategy::Grow {
-                grow_from,
-                batch_size,
-            } => {
+            BranchSyncStrategy::Grow { grow_from, .. } => {
                 let mut v: Vec<TreeNode> = self
                     .in_mem_queue
                     .values()

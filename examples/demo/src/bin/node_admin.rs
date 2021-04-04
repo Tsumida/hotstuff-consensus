@@ -59,11 +59,18 @@ fn main() {
         _ => panic!("unsupported"),
     };
 
+    let flush_interval = config.pm_conf.flush_interval;
+    let non_leader_wait = config.pm_conf.non_leader_wait;
+
     let is_test = if let TestConfig::SingleNode { .. } = config.test_config {
         true
     } else {
         false
     };
+
+    // update static var
+    pacemaker::pacemaker::FLUSH_INTERVAL.get_or_init(|| u64::max(100, flush_interval));
+    pacemaker::pacemaker::DUR_REPLICA_WAIT.get_or_init(|| u64::max(100, non_leader_wait));
 
     let db = match config.persistor {
         demo::config::PersistentBackend::MySQL { db } => db,
@@ -181,7 +188,6 @@ fn main() {
                     .map(|i| i.as_millis())
                     .collect::<Vec<u128>>()
             );
-            info!("max-gap: {}", unlocked_stat.max_gap);
             info!("total: {} ms", unlocked_stat.total_time().as_millis());
         }
     };

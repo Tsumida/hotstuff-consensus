@@ -1,10 +1,10 @@
 //! Timer
-use crate::pacemaker::{CtlRecvr, CtlSender};
+use crate::pacemaker::CtlSender;
 
 use super::pacemaker::TchanS;
 use futures_timer::Delay;
 use hs_data::ViewNumber;
-use log::{debug, error};
+use log::debug;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc,
@@ -37,12 +37,13 @@ impl DefaultTimer {
         ))
     }
 
+    /*
     pub(crate) fn timout_on_gap(&self, alpha: u64, beta: u64, gap: usize) -> Duration {
         Duration::from_millis(u64::min(
             self.max_timeout,
             alpha.saturating_add(beta.wrapping_shl(gap as u32)),
         ))
-    }
+    }*/
 
     pub(crate) fn new(notifier: TchanS<TimeoutEvent>, max_timeout: u64, rtt: u64) -> Self {
         let (stop_ch, _) = tokio::sync::broadcast::channel(1);

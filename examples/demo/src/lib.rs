@@ -4,13 +4,12 @@
 pub mod config;
 pub mod utils;
 
-use hs_data::{TreeNode, Txn, ViewNumber};
+use hs_data::Txn;
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, RwLock},
-    time::SystemTime,
 };
 
 pub struct TxWrapper {
@@ -63,7 +62,7 @@ pub async fn process_new_tx(
     };
 
     match base64::decode(request.tx) {
-        Ok(buf) => {
+        Ok(_) => {
             let txn = Txn(resp.tx_hash.as_bytes().to_vec());
             {
                 let mut sss_unlocked = sss.write().unwrap();
@@ -79,7 +78,7 @@ pub async fn process_new_tx(
             }
             resp.state = TX_STATE_PENDING;
         }
-        Err(e) => {
+        Err(_) => {
             error!("base64 decode failed");
         }
     }

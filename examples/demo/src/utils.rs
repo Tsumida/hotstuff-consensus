@@ -4,7 +4,6 @@ use hs_data::{ReplicaID, TreeNode, ViewNumber, INIT_NODE, INIT_NODE_HASH, PK};
 use hs_network::HotStuffProxy;
 use hss::HotstuffStorage;
 use pacemaker::{elector::RoundRobinLeaderElector, pacemaker::Pacemaker};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     time::{Duration, SystemTime},

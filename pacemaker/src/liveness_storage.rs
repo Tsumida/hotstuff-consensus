@@ -1,10 +1,7 @@
 //! Storage for liveness evnet, message.
 //!
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use crate::data::{BranchData, BranchSyncStrategy, TimeoutCertificate};
 use hs_data::{GenericQC, ReplicaID, TreeNode, ViewNumber};
@@ -63,7 +60,7 @@ pub trait LivenessStorage {
     /// Return true if the number of new-view msgs is at least `n-f`.
     fn new_view_set(&mut self, view: ViewNumber) -> &mut HashMap<ReplicaID, Arc<GenericQC>>;
 
-    /// Remove all new-view msg with small view than `view_threshold`.
+    /// Remove all new-view msg with view smaller than `view_threshold`.
     fn clean_new_view_set(&mut self, view_threshold: ViewNumber);
 
     fn get_threshold(&mut self) -> usize;

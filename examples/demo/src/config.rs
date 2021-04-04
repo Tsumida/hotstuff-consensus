@@ -1,20 +1,32 @@
 //! Configurations for single node or system
 
-use std::collections::HashMap;
-
-use base64::write;
-use hs_data::ReplicaID;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub node_name: String,
     pub bootstrap_conf: BootstrapConfig,
+    pub pm_conf: PacemakerConfig, 
     pub self_addr: String,
     pub persistor: PersistentBackend,
     pub server_addr: String,
     pub secret: SecretConfig,
     pub test_config: TestConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PacemakerConfig{
+    pub flush_interval: u64,    // ms
+    pub non_leader_wait: u64,   // ms 
+}
+
+impl Default for PacemakerConfig{
+    fn default() -> Self{
+        PacemakerConfig{
+            flush_interval: 200,
+            non_leader_wait: 200,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -74,6 +86,10 @@ impl Default for NodeConfig {
                         node_id: format!("Dave"), addr: format!("127.0.0.1:8883")
                     },
                 ],
+            },
+            pm_conf: PacemakerConfig{
+                flush_interval: 200, 
+                non_leader_wait: 200, 
             },
             secret: SecretConfig {
                 sk_id: 0,

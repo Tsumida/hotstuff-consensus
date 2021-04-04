@@ -11,7 +11,7 @@ use hotstuff_rs::safety::machine::{
 };
 use hs_data::{msg::Context, GenericQC, ReplicaID, SignKit, TreeNode, Txn, ViewNumber};
 use std::{
-    collections::{BTreeMap, BinaryHeap, HashMap, VecDeque},
+    collections::{BinaryHeap, VecDeque},
     io,
     sync::{
         atomic::{AtomicU8, Ordering},
@@ -21,6 +21,7 @@ use std::{
 };
 
 use log::{error, info};
+use once_cell::sync::OnceCell;
 
 pub type TchanR<T> = tokio::sync::mpsc::Receiver<T>;
 pub type TchanS<T> = tokio::sync::mpsc::Sender<T>;
@@ -32,8 +33,13 @@ pub type CtlSender = tokio::sync::broadcast::Sender<()>;
 const SYNC_SYNCHRONIZING: u8 = 0;
 const SYNC_IDLE: u8 = 1;
 
-const DEFAULT_FLUSH_INTERVAL: u64 = 500;
-static BATCH_SIZE: usize = 8;
+/// Flushing interval.
+pub static FLUSH_INTERVAL: OnceCell<u64> = OnceCell::new();
+
+/// Non-leader nodes wait for a while for synchronizing.
+pub static DUR_REPLICA_WAIT: OnceCell<u64> = OnceCell::new();
+
+pub static BATCH_SIZE: usize = 8;
 
 // TODO
 #[derive(Debug, Clone)]
@@ -78,6 +84,7 @@ impl Into<SafetyEvent> for SafetyEventWrapper {
 }
 
 #[test]
+#[ignore = "tested"]
 fn test_pending_prop() {
     use std::mem::MaybeUninit;
     let mut pending_prop: BinaryHeap<SafetyEventWrapper> = BinaryHeap::with_capacity(3);
@@ -139,7 +146,7 @@ where
 
         // refactor
         let max_view_timeout = 30_000;
-        let rtt = 5_000;
+        let rtt = 12_000;
         let timer = DefaultTimer::new(notifier, max_view_timeout, rtt);
 
         Self {
@@ -164,7 +171,9 @@ where
 
         self.goto_new_view(1).await?;
 
-        let mut interval = tokio::time::interval(Duration::from_millis(2000));
+        let mut interval = tokio::time::interval(Duration::from_millis(
+            *FLUSH_INTERVAL.get().expect("var uninit"),
+        ));
         interval.tick().await;
 
         loop {
@@ -211,12 +220,18 @@ where
     /// Try to go to view=`new_view`+1.
     async fn process_local_timeout(&mut self, timeout_view: ViewNumber) -> io::Result<()> {
         if timeout_view >= self.view {
+            // generate tc and save it to local storage.
             let qc_high = self.liveness_storage().get_qc_high().as_ref().clone();
             let tc = self.sign_tc(self.view, qc_high);
 
+            // ignore error
+            if let Err(e) = LivenessStorage::append_tc(self.liveness_storage(), tc.clone()) {
+                error!("failed to save tc to local storage: {:?}", e);
+            }
+
             self.emit_peer_event(PeerEvent::Timeout {
                 ctx: Context::broadcast(self.id.clone(), self.view),
-                tc: tc.clone(),
+                tc: tc,
             })
             .await
             .unwrap();
@@ -377,7 +392,11 @@ where
                 // responsiveness, goto next view right now.
                 if flag {
                     // replicas wait for brief time so that leader goes to next view quicker.
-                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    // refactor
+                    tokio::time::sleep(Duration::from_millis(
+                        *DUR_REPLICA_WAIT.get().expect("var uninit"),
+                    ))
+                    .await;
                     self.process_local_timeout(prop.height()).await?;
                 }
             }
@@ -540,6 +559,7 @@ where
         let current_view = self.view;
         let lens = self.liveness_storage().new_view_set(current_view).len();
 
+        // refactor: <= to <
         if lens <= th {
             error!(
                 "new-view msg not enough, need at least {}, got {}",
@@ -571,7 +591,7 @@ pub async fn event_loop_with_functions<S>(
     mut pm: Pacemaker<S>,
     mut quit_ch: TchanR<()>,
     observe_fn: impl Fn() -> Option<oneshot::Sender<PacemakerState>>,
-    inform_fn: impl Fn(Arc<TreeNode>),
+    _: impl Fn(Arc<TreeNode>),
     fetch: impl Fn(bool) -> Option<Vec<Txn>>,
     end_fn: impl Fn(ViewNumber) -> bool,
     finilizer: impl FnOnce(),
@@ -584,14 +604,15 @@ where
 
     pm.goto_new_view(1).await?;
 
-    let mut interval = tokio::time::interval(Duration::from_millis(2000));
+    let mut interval = tokio::time::interval(Duration::from_millis(
+        *FLUSH_INTERVAL.get().expect("var uninit"),
+    ));
     interval.tick().await;
 
     while !quit {
         // process new-tx
         let current_view = pm.view;
         if end_fn(current_view) {
-            quit = true;
             break;
         }
         let enable_make_prop = pm.liveness_storage().new_view_set(current_view).len()
@@ -623,13 +644,6 @@ where
             _ = interval.tick() => {
                 // refactor
                 LivenessStorage::flush(pm.liveness_storage()).await.unwrap();
-
-                while let Some(ready) = pm.ready_queue.pop_front(){
-                    if let machine::Ready::CommitState(_, last_committed) = &ready {
-                        inform_fn(last_committed.clone());
-                    }
-                    pm.process_ready_event(ready).await.unwrap();
-                }
             },
             Some(()) = quit_ch.recv() => {
                 quit = true;
@@ -640,6 +654,10 @@ where
             Some(te) = pm.timeout_ch.recv() => {
                 pm.process_timeout_event(te).await?;
             },
+        }
+
+        while let Some(ready) = pm.ready_queue.pop_front() {
+            pm.process_ready_event(ready).await.unwrap();
         }
     }
 

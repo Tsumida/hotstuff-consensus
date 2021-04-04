@@ -4,9 +4,7 @@ pub mod sign_kit;
 pub mod tree_node;
 pub mod txn;
 
-use std::{convert::TryInto, mem::transmute_copy};
-
-use serde::{Deserialize, Serialize};
+use std::convert::TryInto;
 
 pub use qc::*;
 pub use sign_kit::*;
