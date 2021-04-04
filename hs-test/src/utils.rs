@@ -1,13 +1,10 @@
 //! Utility for testing.
-use simplelog::{CombinedLogger, Config, ConfigBuilder, LevelFilter, WriteLogger};
+use simplelog::{CombinedLogger, ConfigBuilder, LevelFilter, WriteLogger};
 
 const DEBUG_MODE: bool = true;
 
 pub(crate) const TEST_MYSQL_ADDR: &str =
     "mysql://root:helloworld@localhost:3306/hotstuff_test_mocker";
-
-pub(crate) const MYSQL_ADDR_CUSTOM_DB: &str =
-    "mysql://root:helloworld@localhost:3306/hotstuff_test_{}";
 
 pub(crate) fn init_logger(log_path: &str) {
     if DEBUG_MODE {

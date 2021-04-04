@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{mem::MaybeUninit, unimplemented, vec};
 
-use hss::{HotStuffConfig, HotstuffStorage, MySQLStorage};
+use hss::HotstuffStorage;
 use log::debug;
 use threshold_crypto::{PublicKeySet, SecretKeySet, SecretKeyShare, Signature, SignatureShare};
 
@@ -29,7 +29,7 @@ pub(crate) enum ExpectedState<'a> {
 
 pub(crate) struct MockHotStuff {
     testee: Option<Machine<HotstuffStorage>>,
-    token: String,
+    // token: String,
     pks: Option<PublicKeySet>,
     sk: Option<SecretKeySet>,
     sks: Vec<(usize, SecretKeyShare)>,
@@ -58,7 +58,6 @@ impl MockHotStuff {
 
         Self {
             testee: None,
-            token: format!("test"),
             parent: init_node_hash,
             qc_high: init_qc,
 
@@ -121,7 +120,6 @@ impl MockHotStuff {
         self.qcs.insert(init_qc_hash.clone(), init_qc.clone());
         self.nodes.insert(init_node_hash.clone(), init_node.clone());
 
-        let view = 0;
         let mut node_pool = HashMap::new();
         node_pool.insert(init_node_hash.clone(), init_node.clone());
 
@@ -286,7 +284,7 @@ impl MockHotStuff {
 
     /// Leader recv txs from other
     pub(crate) fn testee_recv_new_view_msgs(&mut self, txs: Vec<(usize, String)>) -> &mut Self {
-        for (i, tx) in txs.iter() {
+        for (_, tx) in txs.iter() {
             let node_hash = self.tx_to_hash.get(tx).unwrap();
             debug!("{}, {:?}", tx, &node_hash);
             let node = self.nodes.get(node_hash).unwrap();

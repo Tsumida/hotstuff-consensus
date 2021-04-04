@@ -4,16 +4,15 @@ mod test {
     use cryptokit::DefaultSignaturer;
     use hotstuff_rs::safety::{machine::Machine, voter::Voter};
     use hs_data::{
-        form_chain, msg::Context, threshold_sign_kit, ReplicaID, SignKit, TreeNode, INIT_NODE,
-        INIT_NODE_HASH, INIT_QC, SK,
+        form_chain, msg::Context, threshold_sign_kit, ReplicaID, TreeNode, INIT_NODE,
+        INIT_NODE_HASH, SK,
     };
     use hss::HotstuffStorage;
-    use log::error;
     use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc, time::Duration};
-    use threshold_crypto::{PublicKeySet, SecretKeySet};
+    use threshold_crypto::PublicKeySet;
 
     use pacemaker::{
-        data::{PeerEvent, TimeoutCertificate},
+        data::PeerEvent,
         elector::RoundRobinLeaderElector,
         network::{NetworkAdaptor, NetworkMode},
         pacemaker::{Pacemaker, TchanR, TchanS},
@@ -38,10 +37,8 @@ mod test {
     // const DEFAULT_TH: usize = (DEFAULT_SIZE << 1) / 3;
 
     struct MockerNetwork {
-        token: String,
         pe_sender: TchanS<PeerEvent>,
         pe_recvr: TchanR<PeerEvent>,
-        sks: SecretKeySet,
         pks: PublicKeySet,
         vec_sks: Vec<(usize, SK)>,
     }
@@ -49,7 +46,7 @@ mod test {
     impl MockerNetwork {
         async fn propose_all<'a>(
             &mut self,
-            from: String,
+            _: String,
             props: impl IntoIterator<Item = &'a TreeNode>,
         ) {
             for prop in props.into_iter() {
@@ -94,7 +91,7 @@ mod test {
             .map(|i| (format!("replica-{}", i), format!("127.0.0.1:{}", 8800 + i)))
             .collect();
 
-        let (sks, pks, vec_sks) = threshold_sign_kit(n, threshold);
+        let (_, pks, vec_sks) = threshold_sign_kit(n, threshold);
         let signaturer = Arc::new(DefaultSignaturer::new(
             sign_id,
             pks.clone(),
@@ -137,10 +134,8 @@ mod test {
 
         (
             MockerNetwork {
-                token,
                 pe_sender,
                 pe_recvr,
-                sks,
                 pks,
                 vec_sks,
             },
