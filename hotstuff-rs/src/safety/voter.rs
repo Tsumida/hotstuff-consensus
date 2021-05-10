@@ -76,7 +76,7 @@ impl<S: Signaturer> Voter<S> {
 
     pub fn reset(&mut self, new_view: ViewNumber) {
         self.view = new_view;
-        self.voting_set.clear();
+        self.remove_stale_vote(new_view);
         self.vote_decided = false;
     }
 
@@ -105,5 +105,11 @@ impl<S: Signaturer> Voter<S> {
     // There won't be another voting set with at least n-f votes with view=current_view.
     fn decide(&mut self) {
         self.vote_decided = true;
+    }
+
+    #[inline]
+    pub fn remove_stale_vote(&mut self, new_view: ViewNumber) {
+        let new_voting_set = self.voting_set.split_off(&new_view);
+        self.voting_set = new_voting_set;
     }
 }

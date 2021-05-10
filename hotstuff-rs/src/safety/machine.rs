@@ -120,11 +120,10 @@ pub enum Ready {
     // Node in this message carries qc-high
     UpdateQCHigh(Context, Arc<TreeNode>),
     // Signature for the proposal
-    Signature(Context, Arc<TreeNode>, Box<SignKit>),
+    Signature(Context, Arc<TreeNode>, Box<SignKit>, Arc<TreeNode>),
 
     // refactor:
-    //      Machine didn't output this msg in currect implementation.
-    //      So outside observer can't track commitments.
+    //      remove this event because Signature return last committed proposal.
     CommitState(Context, Arc<TreeNode>),
 
     BranchSyncDone(Arc<TreeNode>),
@@ -208,7 +207,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
     fn update_nodes(&mut self, node: &TreeNode) -> Result<Ready> {
         let chain = self.storage.find_three_chain(node);
         let mut ready = Ready::Nil;
-        // debug!("find chain with {} nodes", chain.len());
+
         if let Some(b_3) = chain.get(0) {
             self.storage.update_qc_high(b_3.as_ref(), node.justify());
         }
@@ -304,6 +303,7 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                     self.storage.update_qc_high(&prop, &qc);
                     info!("qc formed");
 
+                    self.voter.remove_stale_vote(prop.height() + 1);
                     Ok(Ready::ProposalReachConsensus(qc.view()))
                 }
                 Err(e) => Err(SafetyErr::VoterError(e)),
@@ -333,6 +333,8 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                 // sign
                 let sign_kit = self.voter.sign(&prop);
 
+                let last_committed = self.storage.get_last_committed();
+
                 ready = Ready::Signature(
                     Context::single(
                         self.self_id.clone(),
@@ -341,12 +343,15 @@ impl<S: SafetyStorage> Safety for Machine<S> {
                     ),
                     Arc::new(prop.clone()),
                     Box::new(sign_kit),
+                    last_committed,
                 );
             }
         } else {
             // The qc is verified, so we take it.
             self.storage.append_new_qc(prop.justify());
         };
+
+        // currently, ignore
         let _ = self.update_nodes(prop);
         Ok(ready)
     }

@@ -17,6 +17,7 @@ use demo::{
 use hs_data::{ReplicaID, TreeNode, Txn, ViewNumber};
 use log::{info, LevelFilter};
 use pacemaker::pacemaker::event_loop_with_functions;
+use redis::Commands;
 use simplelog::{CombinedLogger, ConfigBuilder, WriteLogger};
 use warp::Filter;
 
@@ -51,7 +52,7 @@ fn main() {
     let pk_set = config.secret.pk_set;
     let num: usize = config.bootstrap_conf.total;
     let token = config.bootstrap_conf.token;
-    let (block_size, block_num) = match config.test_config {
+    let (_, block_num) = match config.test_config {
         demo::config::TestConfig::SingleNode {
             proposal_num,
             proposal_size,
@@ -122,6 +123,16 @@ fn main() {
     let shared_state = Arc::new(RwLock::new(ServerSharedState::default()));
     let s1 = shared_state.clone();
     let stat = Arc::new(Mutex::new(HotStuffNodeStat::default()));
+
+    let mut last_committed = 0u64;
+
+    let redis_client =
+        redis::Client::open("redis://localhost:6379").expect("can't open redis connection");
+
+    let mut redis_conn = redis_client
+        .get_connection()
+        .expect("failed to connect redis");
+
     // --------------------------------------------- tx-server ----------------------------------------------
     let shared_state_fn = warp::any().map(move || s1.clone());
 
@@ -147,39 +158,63 @@ fn main() {
 
     // --------------------------------------------- hooks ----------------------------------------------
     // inform_fn should not keep prop in case of memery leak.
-    let inform_fn = |prop: Arc<TreeNode>| {
+    let inform_fn = |replica_id: &str, mut prop: Vec<Arc<TreeNode>>| {
+        prop.retain(|x| x.height > last_committed);
+
+        last_committed = prop
+            .iter()
+            .max_by_key(|x| x.height)
+            .map_or(last_committed, |x| x.height);
+
+        if prop.len() == 0 {
+            return;
+        }
+
+        let mut stat_unlocked = stat.lock().unwrap();
+        let mut commmitted_view = vec![];
         {
             let mut sss_unlocked = shared_state.write().unwrap();
             // update txn.
-            for proposal in prop.tx() {
-                // interpret
-                sss_unlocked
-                    .tx_pool
-                    .entry(String::from_utf8(proposal.0.clone()).unwrap())
-                    .and_modify(|txw| {
-                        txw.state = TX_STATE_COMMITTED;
-                    });
-            }
-        }
+            prop.into_iter().for_each(|p| {
+                for proposal in p.tx() {
+                    // interpret
+                    sss_unlocked
+                        .tx_pool
+                        .entry(String::from_utf8(proposal.0.clone()).unwrap())
+                        .and_modify(|txw| {
+                            txw.state = TX_STATE_COMMITTED;
+                        });
+                }
+                stat_unlocked.take_new_committed_prop(p.as_ref());
 
-        stat.lock().unwrap().take_new_committed_prop(&prop);
+                commmitted_view.push(p.height);
+            });
+        }
+        drop(stat_unlocked);
+
+        // demo: publish committed to ...
+        let _: i32 = redis_conn
+            .publish(
+                "hotstuff_test",
+                format!("node-{} commmit: {:?}", replica_id, commmitted_view),
+            )
+            .expect("crashed");
     };
 
     // update imformation
     let observe_fn = || None;
 
-    let fetch = |enable_make_prop: bool| {
+    let fetch = |enable_make_prop: bool, view: ViewNumber| {
         if !enable_make_prop {
             return None;
         }
-        Some(vec![Txn(vec![0u8; block_size])])
+        Some(vec![Txn(view.to_be_bytes().to_vec())])
     };
 
     let finilizer = || {
         if is_test {
             info!("finilizing");
             let unlocked_stat = stat.lock().unwrap();
-            info!("committed:  {:?}", unlocked_stat.committed_prop_list);
             info!(
                 "interval(ms):  {:?}",
                 unlocked_stat

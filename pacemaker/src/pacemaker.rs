@@ -125,6 +125,9 @@ where
 
     timer: DefaultTimer,
     timeout_ch: TchanR<TimeoutEvent>,
+
+    /// tmp buffer for committed proposal.
+    committed_queue: VecDeque<Arc<TreeNode>>,
 }
 
 /// Leader elector using round-robin algorithm.
@@ -161,6 +164,8 @@ where
             timeout_ch,
             machine,
             ready_queue: VecDeque::with_capacity(8),
+
+            committed_queue: VecDeque::with_capacity(32),
         }
     }
 
@@ -376,7 +381,7 @@ where
                     error!("{:?}", e);
                 }
             }
-            machine::Ready::Signature(ctx, prop, sign) => {
+            machine::Ready::Signature(ctx, prop, sign, last_committed) => {
                 let flag = match ctx.to {
                     hs_data::msg::DeliveryType::Single(ref to) => to != &self.id,
                     _ => unreachable!(),
@@ -399,6 +404,9 @@ where
                     .await;
                     self.process_local_timeout(prop.height()).await?;
                 }
+
+                // may refactor
+                self.committed_queue.push_back(last_committed);
             }
             machine::Ready::CommitState(_, _) => {}
             machine::Ready::BranchSyncDone(leaf) => {
@@ -526,6 +534,7 @@ where
             self.elector.get_leader(self.view).to_string(),
             self.view,
         );
+
         self.emit_peer_event(PeerEvent::NewView {
             ctx,
             qc_high: Box::new(qc_high.as_ref().clone()),
@@ -591,8 +600,8 @@ pub async fn event_loop_with_functions<S>(
     mut pm: Pacemaker<S>,
     mut quit_ch: TchanR<()>,
     observe_fn: impl Fn() -> Option<oneshot::Sender<PacemakerState>>,
-    _: impl Fn(Arc<TreeNode>),
-    fetch: impl Fn(bool) -> Option<Vec<Txn>>,
+    mut inform_fn: impl FnMut(&str, Vec<Arc<TreeNode>>),
+    fetch: impl Fn(bool, ViewNumber) -> Option<Vec<Txn>>,
     end_fn: impl Fn(ViewNumber) -> bool,
     finilizer: impl FnOnce(),
 ) -> std::io::Result<()>
@@ -615,10 +624,12 @@ where
         if end_fn(current_view) {
             break;
         }
+
+        // refactor: add leader verifying.
         let enable_make_prop = pm.liveness_storage().new_view_set(current_view).len()
             > pm.liveness_storage().get_threshold();
 
-        if let Some(cmds) = fetch(enable_make_prop) {
+        if let Some(cmds) = fetch(enable_make_prop, pm.view) {
             let ready = pm.make_new_proposal(cmds);
             match ready {
                 Some(ready) => pm.ready_queue.push_back(ready),
@@ -658,6 +669,11 @@ where
 
         while let Some(ready) = pm.ready_queue.pop_front() {
             pm.process_ready_event(ready).await.unwrap();
+        }
+
+        if pm.committed_queue.len() > 0 {
+            inform_fn(&pm.id, pm.committed_queue.into_iter().collect());
+            pm.committed_queue = VecDeque::with_capacity(16);
         }
     }
 
