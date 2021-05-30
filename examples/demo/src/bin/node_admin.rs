@@ -17,7 +17,7 @@ use demo::{
 use hs_data::{ReplicaID, TreeNode, Txn, ViewNumber};
 use log::{info, LevelFilter};
 use pacemaker::pacemaker::event_loop_with_functions;
-use redis::Commands;
+// use redis::Commands;
 use simplelog::{CombinedLogger, ConfigBuilder, WriteLogger};
 use warp::Filter;
 
@@ -34,13 +34,20 @@ fn main() {
                 .takes_value(true)
                 .help("Load config file"),
         )
+        .arg(
+            Arg::with_name("recovery")
+                .short("r")
+                .long("recover")
+                .takes_value(false)
+                .help("Recover from previous state"),
+        )
         .get_matches();
 
     // load config
     let config_path = matches.value_of("config-file").expect("Need config file");
     let mut conf_str = String::new();
     let _ = std::fs::File::open(config_path)
-        .unwrap()
+        .expect(&format!("can't find {}", conf_str))
         .read_to_string(&mut conf_str)
         .unwrap();
     let config: NodeConfig = serde_yaml::from_str(&conf_str).expect("can't parse config file");
@@ -73,9 +80,10 @@ fn main() {
     pacemaker::pacemaker::FLUSH_INTERVAL.get_or_init(|| u64::max(100, flush_interval));
     pacemaker::pacemaker::DUR_REPLICA_WAIT.get_or_init(|| u64::max(100, non_leader_wait));
 
-    let db = match config.persistor {
-        demo::config::PersistentBackend::MySQL { db } => db,
-        _ => panic!("unsupported type"),
+    let db = match &config.persistor {
+        demo::config::PersistentBackend::MySQL { db } => Some(db.as_ref()),
+        demo::config::PersistentBackend::NoPersistor => None,
+        // _ => panic!("unsupported type"),
     };
 
     let peer_addrs: HashMap<ReplicaID, String> = config
@@ -126,13 +134,6 @@ fn main() {
 
     let mut last_committed = 0u64;
 
-    let redis_client =
-        redis::Client::open("redis://localhost:6379").expect("can't open redis connection");
-
-    let mut redis_conn = redis_client
-        .get_connection()
-        .expect("failed to connect redis");
-
     // --------------------------------------------- tx-server ----------------------------------------------
     let shared_state_fn = warp::any().map(move || s1.clone());
 
@@ -158,7 +159,7 @@ fn main() {
 
     // --------------------------------------------- hooks ----------------------------------------------
     // inform_fn should not keep prop in case of memery leak.
-    let inform_fn = |replica_id: &str, mut prop: Vec<Arc<TreeNode>>| {
+    let inform_fn = |_: &str, mut prop: Vec<Arc<TreeNode>>| {
         prop.retain(|x| x.height > last_committed);
 
         last_committed = prop
@@ -191,14 +192,6 @@ fn main() {
             });
         }
         drop(stat_unlocked);
-
-        // demo: publish committed to ...
-        let _: i32 = redis_conn
-            .publish(
-                "hotstuff_test",
-                format!("node-{} commmit: {:?}", replica_id, commmitted_view),
-            )
-            .expect("crashed");
     };
 
     // update imformation
@@ -239,7 +232,7 @@ fn main() {
     tokio::runtime::Runtime::new()
         .unwrap()
         .block_on(async move {
-            let pm = init_hotstuff_node(token, num, replica_id, &db, peer_addrs, signaturer).await;
+            let pm = init_hotstuff_node(token, num, replica_id, db, peer_addrs, signaturer).await;
             let (_, quit_ch) = tokio::sync::mpsc::channel(1);
 
             tokio::spawn(warp::serve(tx_server).run(tx_server_addr));

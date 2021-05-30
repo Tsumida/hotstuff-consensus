@@ -32,7 +32,7 @@ impl std::convert::From<(Sign, SignID)> for SignKit {
         }
     }
 }
-
+/// Generate `SecretKeySet`, `PublicKeySet` and `SecretKeyShare` (numbered from 0 to n-1).
 pub fn threshold_sign_kit(
     n: usize,
     t: usize,

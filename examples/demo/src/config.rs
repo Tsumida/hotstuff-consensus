@@ -41,7 +41,7 @@ pub struct BootstrapConfig {
     pub peer_addrs: Vec<PeerInfo>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PeerInfo {
     pub node_id: String,
     pub addr: String,
@@ -110,7 +110,12 @@ impl Default for NodeConfig {
 }
 
 #[test]
+#[ignore = "dev"]
 fn test_config_fmt() {
+    //
+    // Generate node configuration. 
+    // 
+
     let path = "./test-output/alice-config.yml";
     let conf = NodeConfig::default();
     let mut writer = std::fs::OpenOptions::new()
@@ -123,6 +128,7 @@ fn test_config_fmt() {
 }
 
 #[test]
+#[ignore = "dev"]
 fn test_read_config() {
     let path = "./test-output/alice-config.yml";
 

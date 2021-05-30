@@ -58,10 +58,11 @@ mod hss_test {
         hss::HotstuffStorage::recover(token, mysql_addr)
     }
 
+    #[tokio::test]
     async fn test_init_and_recover() {
         //
         //  Test:
-        //      Flush all dirty data into MySQL.
+        //      Keep flushing data after crash.
         //
         //
         let mut hss = hss_with_mysql_enabled(
@@ -106,13 +107,5 @@ mod hss_test {
             hss2.append_new_node(node);
         }
         hss2.async_flush().await.unwrap();
-    }
-
-    #[test]
-    fn test_hss_init_and_recover() {
-        init_logger();
-        tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(test_init_and_recover());
     }
 }

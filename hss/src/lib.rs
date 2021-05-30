@@ -403,7 +403,7 @@ impl SafetyStorage for HotstuffStorage {
         let h = TreeNode::hash(node);
         let node = Arc::new(node.clone());
 
-        // Warning: OOM since every node has a replica in memory.
+        // Warning: May OOM since every node has a replica in memory.
         self.insert(h, node);
         self.set_dirty();
     }
