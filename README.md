@@ -1,6 +1,8 @@
 # hotstuff-consensus
-## Note
-hotstuff-consensus is under development. Since it's buggy, more tests and refactoring are needed. 
+## Intro
+hotstuff-consensus is a Rust implementation of https://dl.acm.org/doi/10.1145/3293611.3331591. 
+This project is under development. Since it's buggy, more tests and refactoring are needed. 
+
 ## Arch
 ![arch](https://github.com/Tsumida/hotstuff-consensus/blob/dev/design/arch.png)
 
